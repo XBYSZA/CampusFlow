@@ -1,6 +1,6 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getAIProvider } from "@/lib/ai";
+import { AIConfigError, AIError, getAIProvider, type AIErrorCode } from "@/lib/ai";
 import {
   DECOMPOSITION_MAX_SUBTASKS,
   DECOMPOSITION_MIN_SUBTASKS,
@@ -8,6 +8,7 @@ import {
   decompositionResultSchema,
   sortProposedSubTasks,
   validateDecomposition,
+  type AIMeta,
   type DecompositionResult,
   type ProposedSubTask,
 } from "@/lib/ai/contract";
@@ -25,7 +26,8 @@ export class TaskError extends Error {
       | "ALREADY_DECOMPOSED"
       | "VALIDATION_FAILED"
       | "DECOMPOSITION_INVALID"
-      | "PROVIDER_ERROR",
+      | "PROVIDER_ERROR"
+      | AIErrorCode,
     message: string,
   ) {
     super(message);
@@ -150,8 +152,25 @@ export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
 
 export interface DecomposeOutput {
   provider: string;
+  /** real 时为模型名，mock 为 null */
+  model: string | null;
+  promptVersion: string;
+  durationMs: number;
+  /** 供确认拆解时回传，写入 DecisionLog */
+  aiMeta: AIMeta;
   taskSummary: string;
   subtasks: ProposedSubTask[];
+}
+
+/** 把 Provider / 配置错误翻译成带明确错误码的业务错误（不隐藏真实失败） */
+function toProviderError(error: unknown): TaskError {
+  if (error instanceof AIConfigError) {
+    return new TaskError("AI_CONFIG_INVALID", error.message);
+  }
+  if (error instanceof AIError) {
+    return new TaskError(error.code, `AI 调用失败（${error.code}）：${error.message}`);
+  }
+  return new TaskError("PROVIDER_ERROR", `AI Provider 调用失败：${(error as Error).message}`);
 }
 
 /**
@@ -180,7 +199,7 @@ export async function decomposeTask(taskId: string): Promise<DecomposeOutput> {
   try {
     provider = getAIProvider();
   } catch (error) {
-    throw new TaskError("PROVIDER_ERROR", (error as Error).message);
+    throw toProviderError(error);
   }
 
   const sourceContext = task.source
@@ -188,6 +207,7 @@ export async function decomposeTask(taskId: string): Promise<DecomposeOutput> {
     : undefined;
 
   let rawOutput: unknown;
+  const startedAt = Date.now();
   try {
     rawOutput = await provider.decomposeTask({
       taskId: task.id,
@@ -198,8 +218,9 @@ export async function decomposeTask(taskId: string): Promise<DecomposeOutput> {
       sourceContext,
     });
   } catch (error) {
-    throw new TaskError("PROVIDER_ERROR", `AI Provider 调用失败：${(error as Error).message}`);
+    throw toProviderError(error);
   }
+  const durationMs = Date.now() - startedAt;
 
   const parsed = decompositionResultSchema.safeParse(rawOutput);
   if (!parsed.success) {
@@ -216,8 +237,20 @@ export async function decomposeTask(taskId: string): Promise<DecomposeOutput> {
     throw new TaskError("DECOMPOSITION_INVALID", problems.join("；"));
   }
 
+  const meta = provider.meta;
+  const aiMeta: AIMeta = {
+    provider: meta.provider,
+    model: meta.model,
+    promptVersion: meta.decompositionPromptVersion,
+    durationMs,
+  };
+
   return {
     provider: provider.name,
+    model: meta.model,
+    promptVersion: meta.decompositionPromptVersion,
+    durationMs,
+    aiMeta,
     taskSummary: parsed.data.taskSummary,
     subtasks: sortProposedSubTasks(parsed.data.subtasks),
   };
@@ -238,6 +271,7 @@ export async function writeDecomposition(
   tx: Prisma.TransactionClient,
   task: { id: string; title: string; deadline: Date | null; estimatedMinutes: number | null },
   result: DecompositionResult,
+  aiMeta?: AIMeta,
 ): Promise<{ subtaskIds: string[]; decisionLogId: string }> {
   const ordered = sortProposedSubTasks(result.subtasks);
   const idMap = new Map<string, string>();
@@ -276,9 +310,18 @@ export async function writeDecomposition(
   }
 
   // 3) 决策留痕：输入任务摘要 / 输出子任务摘要 / 依赖摘要
+  //    只记录 provider / model / prompt 版本 / 耗时，不含任何密钥或完整 Prompt
+  const metaParts: string[] = [];
+  if (aiMeta) {
+    metaParts.push(`AI provider=${aiMeta.provider}`);
+    if (aiMeta.model) metaParts.push(`model=${aiMeta.model}`);
+    metaParts.push(`promptVersion=${aiMeta.promptVersion}`);
+    if (typeof aiMeta.durationMs === "number") metaParts.push(`耗时 ${aiMeta.durationMs}ms`);
+  }
+  const metaSuffix = metaParts.length > 0 ? `；${metaParts.join("；")}` : "";
   const inputSummary = `任务「${task.title}」，截止 ${
     task.deadline ? task.deadline.toISOString() : "未设置"
-  }，预计 ${task.estimatedMinutes ?? "未设置"} 分钟`;
+  }，预计 ${task.estimatedMinutes ?? "未设置"} 分钟${metaSuffix}`;
   const outputSummary = ordered
     .map(
       (s, i) =>
@@ -364,7 +407,7 @@ export async function confirmDecomposition(
   }
 
   const written = await prisma.$transaction(async (tx) => {
-    return writeDecomposition(tx, task, result);
+    return writeDecomposition(tx, task, result, parsed.data.aiMeta);
   });
 
   const dependencyCount = result.subtasks.reduce((sum, s) => sum + s.dependsOn.length, 0);

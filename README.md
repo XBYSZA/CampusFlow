@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-S5 · 冲突检测 + 自动重排
+S6 · 真实 LLM Provider 接入
 
 ## S4 当前能力
 
@@ -68,6 +68,77 @@ LLM 擅长理解语义，但不能保证时间约束绝对正确。排期必须�
 2. 前端展示虚线预览块，用户点击「确认此计划」
 3. `POST /api/schedule/confirm`：重新查询 Task/SubTask/Course/Schedule，逐条校验 owner 合法性、时长粒度、过去/截止/范围、课程与日程重叠、块间重叠、依赖顺序、总时长与重复确认
 4. 校验通过后单事务写入 `Schedule` 与 `DecisionLog(PLAN)`，任一步失败整体回滚
+
+## S6 当前能力
+
+- 在不改动 Inbox / Tasks 业务逻辑的前提下新增 `RealAIProvider`，任务提取与任务拆解可由真实大模型完成
+- `MockAIProvider` 保留为开发、离线演示与断网兜底，`AI_PROVIDER=mock` 时二阶段验证脚本仍全绿
+- 排期 / 冲突检测 / 重排时间决策**完全不经过 LLM**，仍由 S4/S5 的确定性引擎完成
+
+### Provider 结构
+
+```
+                 ┌─ MockAIProvider（规则引擎，默认）
+AIProvider ──────┤
+                 └─ RealAIProvider（OpenAI-compatible HTTP）
+        ↑
+ Inbox Service / Tasks Service（只依赖接口，不依赖某家供应商）
+```
+
+### 两种模式
+
+```bash
+# 1) Mock 模式（默认，无需任何密钥）
+AI_PROVIDER=mock
+npm run dev
+
+# 2) Real 模式（OpenAI-compatible 接口）
+AI_PROVIDER=real
+REAL_LLM_BASE_URL=https://<your-endpoint>/v1
+REAL_LLM_API_KEY=<your-key>
+REAL_LLM_MODEL=<your-model>
+REAL_LLM_TIMEOUT_MS=30000   # 可选，默认 30000
+npm run dev
+```
+
+- 只读取服务端环境变量，不使用 `NEXT_PUBLIC_` 前缀，API Key 不会返回浏览器
+- `AI_PROVIDER=real` 但缺少必需配置时返回 `AI_CONFIG_INVALID`，**不会静默回退 Mock**
+- 真实密钥不要提交到 Git；`.env.example` 只保留空值模板
+
+### 真实模型的职责边界
+
+- 只用于信息理解（提取任务、拆解子任务），不决定任何具体时间
+- 不直接操作数据库，不自动确认提取 / 拆解 / 重排
+- 结果仍要经过与 Mock 完全相同的 Zod 契约校验与 evidence 校验
+
+### Prompt 模板
+
+- [prompts.ts](src/lib/ai/prompts.ts) 集中管理提取与拆解 Prompt
+- `EXTRACTION_PROMPT_VERSION = "1.0"`、`DECOMPOSITION_PROMPT_VERSION = "1.0"`
+- DecisionLog 只记录版本号，不记录完整 Prompt（模板本身在 Git 仓库中）
+
+### 真实模型的 evidence 策略
+
+模型只返回 `quote`，服务端在原文中定位并计算 `start/end`，不信任模型自报的字符偏移：
+
+```
+模型输出 quote → 原文唯一命中 → 计算 start/end → 正式 Evidence → 复用 S2 校验
+              ├─ 0 次命中 → EVIDENCE_NOT_FOUND
+              └─ 多次命中 → EVIDENCE_AMBIGUOUS
+```
+
+### 错误与重试
+
+- `AI_CONFIG_INVALID` / `AI_REQUEST_FAILED` / `AI_TIMEOUT` / `AI_RESPONSE_INVALID` / `AI_SCHEMA_INVALID` / `EVIDENCE_NOT_FOUND` / `EVIDENCE_AMBIGUOUS`
+- 网络错误与 HTTP 5xx 最多自动重试 1 次；400 / 401 / 403 / schema / evidence 错误不重试
+- 请求使用 `AbortController` 超时（默认 30s），不会无限挂起
+
+### S6 验证
+
+```bash
+npm run s6:verify   # 离线验证（fetch 打桩，不访问互联网、不消耗 API）
+npm run s6:smoke    # 可选真实冒烟（未配置 real 时直接 SKIPPED）
+```
 
 ## S5 当前能力
 
@@ -165,15 +236,18 @@ npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清
 npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
 npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
 npm run s5:verify   # S5 冲突检测与重排验证（CalendarEvent/检测/受影响集合/预览/确认事务/清理）
+npm run s6:verify   # S6 真实 Provider 验证（配置/请求组装/超时重试/错误码/quote 定位，离线）
 ```
 
 ## AIProvider 架构
 
 - `src/lib/ai/contract.ts`：Zod 契约 + evidence 精确校验（唯一校验入口）
-- `src/lib/ai/provider.ts`：AIProvider 接口
+- `src/lib/ai/provider.ts`：AIProvider 接口（含 provider / model / prompt 版本元信息）
 - `src/lib/ai/mock-provider.ts`：**开发期 Mock**（确定性规则解析，模拟 500~1000ms 延迟；保守原则，识别不了就不提取）
-- `src/lib/ai/index.ts`：`getAIProvider()` 工厂，经环境变量 `AI_PROVIDER=mock|real` 切换
-- 未来接入真实大模型：新增 `RealAIProvider` 实现同一接口并在工厂注册即可，Inbox 页面与数据库逻辑零改动
+- `src/lib/ai/real-provider.ts`：**真实 Provider**（原生 fetch 调 OpenAI-compatible 接口，不引入厂商 SDK）
+- `src/lib/ai/config.ts`：环境变量读取与启动校验（`AI_CONFIG_INVALID`）
+- `src/lib/ai/prompts.ts`：提取 / 拆解 Prompt 模板与版本号
+- `src/lib/ai/index.ts`：`getAIProvider()` 工厂，经环境变量 `AI_PROVIDER=mock|real` 切换，不缓存、不回退
 
 ## 环境要求
 

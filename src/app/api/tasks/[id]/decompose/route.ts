@@ -9,16 +9,31 @@ export async function POST(_req: Request, context: { params: Promise<{ id: strin
     return jsonResponse(preview);
   } catch (error) {
     if (error instanceof TaskError) {
-      const status =
-        error.code === "TASK_NOT_FOUND"
-          ? 404
-          : error.code === "ALREADY_DECOMPOSED"
-            ? 409
-            : error.code === "PROVIDER_ERROR"
-              ? 502
-              : 422;
-      return jsonResponse({ error: error.message, code: error.code }, { status });
+      return jsonResponse(
+        { error: error.message, code: error.code },
+        { status: statusFor(error.code) },
+      );
     }
     return jsonResponse({ error: "服务器内部错误" }, { status: 500 });
+  }
+}
+
+/** 错误码 → HTTP 状态码：配置/超时/请求失败与业务校验问题要区分清楚 */
+function statusFor(code: TaskError["code"]): number {
+  switch (code) {
+    case "TASK_NOT_FOUND":
+      return 404;
+    case "ALREADY_DECOMPOSED":
+      return 409;
+    case "AI_CONFIG_INVALID":
+      return 503;
+    case "AI_TIMEOUT":
+      return 504;
+    case "AI_REQUEST_FAILED":
+    case "AI_RESPONSE_INVALID":
+    case "PROVIDER_ERROR":
+      return 502;
+    default:
+      return 422;
   }
 }

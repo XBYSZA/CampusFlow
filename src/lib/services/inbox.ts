@@ -1,10 +1,11 @@
 import { prisma } from "@/lib/prisma";
-import { getAIProvider } from "@/lib/ai";
+import { AIConfigError, AIError, getAIProvider, type AIErrorCode } from "@/lib/ai";
 import {
   confirmPayloadSchema,
   extractionResultSchema,
   priorityToDomain,
   validateExtractionEvidences,
+  type AIMeta,
   type ConfirmPayload,
   type ExtractionResult,
 } from "@/lib/ai/contract";
@@ -23,7 +24,8 @@ export class InboxError extends Error {
       | "EVIDENCE_INVALID"
       | "VALIDATION_FAILED"
       | "DUPLICATE_SOURCE"
-      | "PROVIDER_ERROR",
+      | "PROVIDER_ERROR"
+      | AIErrorCode,
     message: string,
   ) {
     super(message);
@@ -38,6 +40,23 @@ export interface ExtractInboxInput {
 
 export interface ExtractInboxOutput extends ExtractionResult {
   provider: string;
+  /** real 时为模型名，mock 为 null */
+  model: string | null;
+  promptVersion: string;
+  durationMs: number;
+  /** 供确认入库时回传，写入 DecisionLog */
+  aiMeta: AIMeta;
+}
+
+/** 把 Provider / 配置错误翻译成带明确错误码的业务错误（不隐藏真实失败） */
+function toProviderError(error: unknown): InboxError {
+  if (error instanceof AIConfigError) {
+    return new InboxError("AI_CONFIG_INVALID", error.message);
+  }
+  if (error instanceof AIError) {
+    return new InboxError(error.code, `AI 调用失败（${error.code}）：${error.message}`);
+  }
+  return new InboxError("PROVIDER_ERROR", `AI Provider 调用失败：${(error as Error).message}`);
 }
 
 /** 提取：调 AIProvider → Zod 校验 → evidence 精确匹配校验。不写数据库。 */
@@ -51,15 +70,17 @@ export async function extractInbox(input: ExtractInboxInput): Promise<ExtractInb
   try {
     provider = getAIProvider();
   } catch (error) {
-    throw new InboxError("PROVIDER_ERROR", (error as Error).message);
+    throw toProviderError(error);
   }
 
   let rawOutput: unknown;
+  const startedAt = Date.now();
   try {
     rawOutput = await provider.extractTasks({ rawText, sourceTitle: input.sourceTitle });
   } catch (error) {
-    throw new InboxError("PROVIDER_ERROR", `AI Provider 调用失败：${(error as Error).message}`);
+    throw toProviderError(error);
   }
+  const durationMs = Date.now() - startedAt;
 
   const parsed = extractionResultSchema.safeParse(rawOutput);
   if (!parsed.success) {
@@ -75,7 +96,22 @@ export async function extractInbox(input: ExtractInboxInput): Promise<ExtractInb
     throw new InboxError("EVIDENCE_INVALID", problems.join("；"));
   }
 
-  return { provider: provider.name, ...parsed.data };
+  const meta = provider.meta;
+  const aiMeta: AIMeta = {
+    provider: meta.provider,
+    model: meta.model,
+    promptVersion: meta.extractionPromptVersion,
+    durationMs,
+  };
+
+  return {
+    provider: provider.name,
+    model: meta.model,
+    promptVersion: meta.extractionPromptVersion,
+    durationMs,
+    aiMeta,
+    ...parsed.data,
+  };
 }
 
 export interface ConfirmInboxOutput {
@@ -117,7 +153,17 @@ export async function confirmInbox(payload: unknown): Promise<ConfirmInboxOutput
     );
   }
 
-  const inputSummary = `收件箱提取：《${data.sourceTitle}》原文 ${data.rawText.length} 字`;
+  // DecisionLog 留痕：只记录 provider / model / prompt 版本 / 耗时，不含任何密钥
+  const metaParts: string[] = [];
+  if (data.aiMeta) {
+    const { provider, model, promptVersion, durationMs } = data.aiMeta;
+    metaParts.push(`AI provider=${provider}`);
+    if (model) metaParts.push(`model=${model}`);
+    metaParts.push(`promptVersion=${promptVersion}`);
+    if (typeof durationMs === "number") metaParts.push(`耗时 ${durationMs}ms`);
+  }
+  const metaSuffix = metaParts.length > 0 ? `；${metaParts.join("；")}` : "";
+  const inputSummary = `收件箱提取：《${data.sourceTitle}》原文 ${data.rawText.length} 字${metaSuffix}`;
 
   const result = await prisma.$transaction(async (tx) => {
     const source = await tx.source.create({

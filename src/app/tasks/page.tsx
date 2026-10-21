@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { AIMeta } from "@/lib/ai/contract";
 
 // ============================================================
-// Tasks 任务板 + AI 拆解（S3）
-// 左侧任务列表 → 右侧详情 → AI 拆解预览 → 人工编辑 → 确认入库
+// Tasks 任务板 + AI 拆解（S3 + S6）
+// 左侧任务列表 → 右侧详情 → AI 拆解预览（Mock / 真实模型）→ 人工编辑 → 确认入库
 // AI 只提出建议，确认后才写入正式数据
 // ============================================================
 
@@ -86,6 +87,8 @@ export default function TasksPage() {
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [drafts, setDrafts] = useState<DraftSubTask[]>([]);
   const [taskSummary, setTaskSummary] = useState("");
+  // S6：本次拆解使用的 Provider 元信息（仅用于展示与决策留痕）
+  const [aiMeta, setAiMeta] = useState<AIMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -94,6 +97,7 @@ export default function TasksPage() {
     setDetail(null);
     setDrafts([]);
     setTaskSummary("");
+    setAiMeta(null);
     setError(null);
     try {
       const res = await fetch(`/api/tasks/${id}`);
@@ -179,6 +183,7 @@ export default function TasksPage() {
         dependsOn: string[];
       }>;
       setTaskSummary(data.taskSummary);
+      setAiMeta((data.aiMeta as AIMeta | undefined) ?? null);
       setDrafts(
         subtasks.map((s) => ({
           clientId: s.clientId,
@@ -223,6 +228,7 @@ export default function TasksPage() {
             sortOrder: d.sortOrder,
             dependsOn: d.dependsOn,
           })),
+          aiMeta: aiMeta ?? undefined,
         }),
       });
       const data = await res.json();
@@ -436,7 +442,7 @@ export default function TasksPage() {
               {phase === "decomposing" && (
                 <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-8 text-sm text-slate-500 shadow-sm">
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
-                  AI 正在拆解任务，分析步骤与依赖关系…
+                  AI 正在分析任务并生成执行步骤…
                 </div>
               )}
 
@@ -448,6 +454,17 @@ export default function TasksPage() {
                     <span className="text-[11px] text-slate-400">可修改标题、耗时与依赖</span>
                   </div>
                   {taskSummary && <p className="mb-3 text-xs text-slate-500">{taskSummary}</p>}
+                  {aiMeta && (
+                    <p className="mb-3 text-[11px] text-slate-400">
+                      {aiMeta.provider === "mock"
+                        ? "开发模式：Mock AI"
+                        : `AI 模型：${aiMeta.model ?? "unknown"}`}
+                      {` · Prompt v${aiMeta.promptVersion}`}
+                      {typeof aiMeta.durationMs === "number"
+                        ? ` · ${(aiMeta.durationMs / 1000).toFixed(1)}s`
+                        : ""}
+                    </p>
+                  )}
 
                   <div className="flex flex-col gap-2">
                     {orderedDrafts.map((draft, index) => {

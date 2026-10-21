@@ -47,10 +47,26 @@ const COURSE_ID = `${PREFIX}course_thu`;
 const SCHED_SUB1_ID = `${PREFIX}sched_s1`;
 const SCHED_SUB2_ID = `${PREFIX}sched_s2`;
 
+// 测试过程中动态创建的 CalendarEvent（cuid 无前缀），单独记录以便精确清理，
+// 避免像旧版那样全量 deleteMany 误删人工演示数据。
+const createdEventIds: string[] = [];
+
 async function cleanup() {
-  // seed 不含 Conflict 与 CalendarEvent，可安全全量清理
-  await prisma.conflict.deleteMany({});
-  await prisma.calendarEvent.deleteMany({});
+  await prisma.conflict.deleteMany({
+    where: {
+      OR: [
+        { scheduleAId: { startsWith: PREFIX } },
+        { scheduleBId: { startsWith: PREFIX } },
+        { courseId: { startsWith: PREFIX } },
+        { calendarEventId: { startsWith: PREFIX } },
+        { calendarEventId: { in: createdEventIds } },
+      ],
+    },
+  });
+  await prisma.calendarEvent.deleteMany({
+    where: { OR: [{ id: { startsWith: PREFIX } }, { id: { in: createdEventIds } }] },
+  });
+  createdEventIds.length = 0;
   await prisma.schedule.deleteMany({
     where: { OR: [{ taskId: { startsWith: PREFIX } }, { subTaskId: { startsWith: PREFIX } }] },
   });
@@ -140,6 +156,7 @@ async function main() {
     location: "报告厅",
     eventType: "LECTURE",
   });
+  createdEventIds.push(created.event.id);
   check("1. CalendarEvent 合法创建", created.event.title === "学院创新讲座" && created.newConflicts >= 1, `newConflicts=${created.newConflicts}`);
 
   await expectCode(
@@ -336,6 +353,7 @@ async function main() {
         eventType: "OTHER",
       },
     });
+    createdEventIds.push(tamperEvent.id);
     // 手动创建一个冲突记录用于 confirm 测试
     const tamperConflict = await prisma.conflict.create({
       data: {
@@ -420,6 +438,7 @@ async function main() {
         eventType: "OTHER",
       },
     });
+    createdEventIds.push(rollbackEvent.id);
     const rollbackConflict = await prisma.conflict.create({
       data: {
         scheduleAId: sub2NewSchedule.id,

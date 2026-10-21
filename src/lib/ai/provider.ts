@@ -26,9 +26,20 @@ export interface DecomposeTaskInput {
   sourceContext?: string;
 }
 
+/** Provider 元信息：用于页面展示与 DecisionLog 留痕（不含任何密钥） */
+export interface AIProviderMeta {
+  provider: "mock" | "real";
+  /** real 时是实际模型名；mock 为 null（不暴露无意义的假模型名） */
+  model: string | null;
+  extractionPromptVersion: string;
+  decompositionPromptVersion: string;
+}
+
 export interface AIProvider {
   /** Provider 名称，用于 DecisionLog 记录与调试 */
   readonly name: string;
+  /** 元信息（provider / model / prompt 版本） */
+  readonly meta: AIProviderMeta;
   /**
    * 从非结构化文本中提取事件与任务。
    * 实现方必须保证返回值满足 extractionResultSchema（Zod），

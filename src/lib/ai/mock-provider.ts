@@ -6,7 +6,12 @@ import type {
   ExtractionResult,
   ProposedSubTask,
 } from "./contract";
-import type { AIProvider, DecomposeTaskInput, ExtractTasksInput } from "./provider";
+import type {
+  AIProvider,
+  AIProviderMeta,
+  DecomposeTaskInput,
+  ExtractTasksInput,
+} from "./provider";
 
 // ============================================================
 // MockAIProvider（开发期 Mock，S2）
@@ -140,6 +145,13 @@ function findRule(text: string): TaskRule | null {
 
 export class MockAIProvider implements AIProvider {
   readonly name = "mock";
+  /** Mock 不使用 Prompt 模板，版本号标记为规则版本，便于日志区分 */
+  readonly meta: AIProviderMeta = {
+    provider: "mock",
+    model: null,
+    extractionPromptVersion: "mock-rules-1.0",
+    decompositionPromptVersion: "mock-rules-1.0",
+  };
 
   /**
    * 任务拆解（S3，开发期 Mock）

@@ -16,10 +16,29 @@ export async function POST(req: Request) {
     return jsonResponse(result);
   } catch (error) {
     if (error instanceof InboxError) {
-      const status =
-        error.code === "EMPTY_INPUT" ? 400 : error.code === "PROVIDER_ERROR" ? 502 : 422;
-      return jsonResponse({ error: error.message, code: error.code }, { status });
+      return jsonResponse(
+        { error: error.message, code: error.code },
+        { status: statusFor(error.code) },
+      );
     }
     return jsonResponse({ error: "服务器内部错误" }, { status: 500 });
+  }
+}
+
+/** 错误码 → HTTP 状态码：配置/超时/请求失败与输入问题的语义要区分清楚 */
+function statusFor(code: InboxError["code"]): number {
+  switch (code) {
+    case "EMPTY_INPUT":
+      return 400;
+    case "AI_CONFIG_INVALID":
+      return 503;
+    case "AI_TIMEOUT":
+      return 504;
+    case "AI_REQUEST_FAILED":
+    case "AI_RESPONSE_INVALID":
+    case "PROVIDER_ERROR":
+      return 502;
+    default:
+      return 422;
   }
 }

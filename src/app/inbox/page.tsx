@@ -2,11 +2,12 @@
 
 import { useMemo, useRef, useState } from "react";
 import { DEMO_NOTICE } from "@/lib/fixtures/demo-notice";
-import type { Evidence } from "@/lib/ai/contract";
+import type { AIMeta, Evidence } from "@/lib/ai/contract";
 
 // ============================================================
-// Inbox 智能收件箱（S2）
-// 粘贴通知 → Mock AI 结构化提取 → 原文证据高亮 → 编辑 → 确认入库
+// Inbox 智能收件箱（S2 + S6）
+// 粘贴通知 → AI 结构化提取（Mock / 真实模型由服务端环境变量切换）
+// → 原文证据高亮 → 编辑 → 确认入库
 // ============================================================
 
 type Phase = "idle" | "analyzing" | "extracted" | "confirming" | "confirmed";
@@ -76,6 +77,8 @@ export default function InboxPage() {
   const [confirmResult, setConfirmResult] = useState<ConfirmResult | null>(null);
   const [activeEvidence, setActiveEvidence] = useState<{ task: number; ev: number } | null>(null);
   const [showEditor, setShowEditor] = useState(true);
+  // S6：本次提取使用的 Provider 元信息（仅用于展示与决策留痕）
+  const [aiMeta, setAiMeta] = useState<AIMeta | null>(null);
   // 初始为空串保证预渲染确定性；在首次解析（事件处理器）中惰性生成一次性提交 ID
   const submissionIdRef = useRef<string>("");
   const highlightRefs = useRef(new Map<string, HTMLElement>());
@@ -115,6 +118,7 @@ export default function InboxPage() {
     setConfirmResult(null);
     setActiveEvidence(null);
     setShowEditor(true);
+    setAiMeta(null);
     submissionIdRef.current = crypto.randomUUID();
   }
 
@@ -143,6 +147,7 @@ export default function InboxPage() {
       if (!res.ok) throw new Error(data.error ?? "解析失败");
       setEventTitle(data.eventTitle);
       setSummary(data.summary);
+      setAiMeta((data.aiMeta as AIMeta | undefined) ?? null);
       setTasks(
         (data.tasks as Array<{
           title: string;
@@ -202,6 +207,7 @@ export default function InboxPage() {
           rawText,
           eventTitle,
           submissionId: submissionIdRef.current,
+          aiMeta: aiMeta ?? undefined,
           tasks: tasks.map((t) => ({
             title: t.title.trim(),
             description: t.description.trim() || null,
@@ -347,7 +353,7 @@ export default function InboxPage() {
             {analyzing && (
               <div className="mt-4 flex items-center gap-3 rounded-lg bg-slate-50 px-4 py-6 text-sm text-slate-500">
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
-                AI 正在分析通知内容，提取任务与截止时间…
+                AI 正在理解通知并提取任务…
               </div>
             )}
 
@@ -363,6 +369,17 @@ export default function InboxPage() {
                   <p className="text-xs text-slate-400">识别事件</p>
                   <p className="text-base font-semibold text-slate-900">{eventTitle}</p>
                   <p className="mt-1 text-xs text-slate-500">{summary}</p>
+                  {aiMeta && (
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      {aiMeta.provider === "mock"
+                        ? "开发模式：Mock AI"
+                        : `AI 模型：${aiMeta.model ?? "unknown"}`}
+                      {` · Prompt v${aiMeta.promptVersion}`}
+                      {typeof aiMeta.durationMs === "number"
+                        ? ` · ${(aiMeta.durationMs / 1000).toFixed(1)}s`
+                        : ""}
+                    </p>
+                  )}
                 </div>
 
                 {tasks.map((task, ti) => (

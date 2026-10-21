@@ -56,6 +56,18 @@ export const extractionResultSchema = z.object({
 
 export type ExtractionResult = z.infer<typeof extractionResultSchema>;
 
+// ---------- AI 调用元信息（S6，仅用于 DecisionLog 留痕，不参与业务校验） ----------
+// 由提取/拆解预览接口返回，用户确认时原样回传；
+// 只记录 provider / model / prompt 版本 / 耗时，绝不包含 API Key。
+export const aiMetaSchema = z.object({
+  provider: z.enum(["mock", "real"]),
+  model: z.string().max(120).nullable().optional(),
+  promptVersion: z.string().max(60),
+  durationMs: z.number().int().nonnegative().max(600000).optional(),
+});
+
+export type AIMeta = z.infer<typeof aiMetaSchema>;
+
 // ---------- confirm 入参契约（用户编辑后的结果） ----------
 export const confirmedTaskSchema = z.object({
   title: z.string().min(1).max(100),
@@ -85,6 +97,8 @@ export const confirmPayloadSchema = z.object({
   tasks: z.array(confirmedTaskSchema).min(1).max(20),
   // 客户端一次性提交标识，仅用于 DecisionLog 追溯，不作为幂等键
   submissionId: z.string().min(8).max(64).optional(),
+  // 提取时使用的 AI Provider 元信息（仅留痕）
+  aiMeta: aiMetaSchema.optional(),
 });
 
 export type ConfirmPayload = z.infer<typeof confirmPayloadSchema>;
@@ -182,6 +196,8 @@ export const confirmDecompositionPayloadSchema = z.object({
     .array(proposedSubTaskSchema)
     .min(DECOMPOSITION_MIN_SUBTASKS)
     .max(DECOMPOSITION_MAX_SUBTASKS),
+  // 拆解预览时使用的 AI Provider 元信息（仅留痕）
+  aiMeta: aiMetaSchema.optional(),
 });
 
 export type ConfirmDecompositionPayload = z.infer<typeof confirmDecompositionPayloadSchema>;
