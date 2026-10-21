@@ -40,3 +40,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prisma (local sqlite database files & generated client, 不入库)
+prisma/dev.db*
+src/generated/

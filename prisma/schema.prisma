@@ -1,0 +1,156 @@
+// CampusFlow 数据模型（S1）
+// 说明：SQLite 不支持数据库层枚举校验，所有状态类字段统一使用 String，
+// 取值范围与校验结构统一定义在 src/lib/domain.ts
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// 原始信息：粘贴的校园通知 / 群聊消息 / PDF 文本
+model Source {
+  id         String   @id @default(cuid())
+  title      String
+  rawText    String
+  sourceType String   @default("NOTICE") // NOTICE | GROUP_CHAT | PDF_TEXT
+  capturedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  tasks Task[]
+
+  @@index([sourceType])
+}
+
+// 主任务
+model Task {
+  id               String    @id @default(cuid())
+  source           Source?   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  sourceId         String?
+  title            String
+  description      String?
+  deadline         DateTime?
+  priority         String    @default("MEDIUM") // LOW | MEDIUM | HIGH
+  estimatedMinutes Int?
+  status           String    @default("TODO") // TODO | IN_PROGRESS | DONE
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  subTasks     SubTask[]
+  schedules    Schedule[]
+  decisionLogs DecisionLog[]
+
+  @@index([sourceId])
+  @@index([deadline])
+  @@index([status])
+}
+
+// 子任务：任务拆解结果
+model SubTask {
+  id               String   @id @default(cuid())
+  task             Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId           String
+  title            String
+  estimatedMinutes Int?
+  sortOrder        Int      @default(0)
+  status           String   @default("TODO") // TODO | IN_PROGRESS | DONE
+  createdAt        DateTime @default(now())
+
+  schedules Schedule[]
+  // 依赖关系：dependencies 返回"本子任务依赖哪些子任务"，dependents 返回"哪些子任务依赖本子任务"
+  dependencies SubTaskDependency[] @relation("dependent")
+  dependents   SubTaskDependency[] @relation("dependency")
+
+  @@index([taskId])
+  @@index([status])
+}
+
+// 子任务依赖关系：显式联结表（双外键 + 唯一约束），由数据库保证引用有效性
+model SubTaskDependency {
+  id          String   @id @default(cuid())
+  subTask     SubTask  @relation("dependent", fields: [subTaskId], references: [id], onDelete: Cascade)
+  subTaskId   String
+  dependsOn   SubTask  @relation("dependency", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  dependsOnId String
+  createdAt   DateTime @default(now())
+
+  @@unique([subTaskId, dependsOnId])
+  @@index([dependsOnId])
+}
+
+// 固定课程：每周重复的时间占用，作为日程规划的硬约束
+// dayOfWeek：0=周日 1=周一 ... 6=周六（与 JS Date.getDay() 一致）
+// startMinute / endMinute：当天 00:00 起的分钟数（0-1440），endMinute > startMinute
+model Course {
+  id          String  @id @default(cuid())
+  title       String
+  dayOfWeek   Int
+  startMinute Int
+  endMinute   Int
+  location    String?
+
+  conflicts Conflict[]
+
+  @@index([dayOfWeek])
+}
+
+// 计划日程：只能关联 Task 或 SubTask 之一（互斥约束在应用层校验，见 domain.validateScheduleOwner）
+model Schedule {
+  id        String   @id @default(cuid())
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId    String?
+  subTask   SubTask? @relation(fields: [subTaskId], references: [id], onDelete: Cascade)
+  subTaskId String?
+  startAt   DateTime
+  endAt     DateTime
+  status    String   @default("PROPOSED") // PROPOSED | CONFIRMED | MOVED | CANCELLED
+  rationale String?
+  createdAt DateTime @default(now())
+
+  conflictsAsA Conflict[] @relation("scheduleA")
+  conflictsAsB Conflict[] @relation("scheduleB")
+
+  @@index([taskId])
+  @@index([subTaskId])
+  @@index([startAt])
+}
+
+// 冲突记录：scheduleA 必填；第二参与方为另一个日程（scheduleB）或课程（course），
+// 二者必须二选一（应用层校验，见 domain.validateConflictParticipants）
+model Conflict {
+  id           String    @id @default(cuid())
+  scheduleA    Schedule  @relation("scheduleA", fields: [scheduleAId], references: [id], onDelete: Cascade)
+  scheduleAId  String
+  scheduleB    Schedule? @relation("scheduleB", fields: [scheduleBId], references: [id], onDelete: Cascade)
+  scheduleBId  String?
+  course       Course?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId     String?
+  conflictType String // OVERLAP | DEADLINE_RISK
+  description  String
+  resolution   String?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([scheduleAId])
+  @@index([scheduleBId])
+  @@index([courseId])
+  @@index([conflictType])
+}
+
+// 决策日志：记录 AI / 规则决策的输入、输出与原文依据（S1 仅建模，不实现决策服务）
+model DecisionLog {
+  id            String   @id @default(cuid())
+  actionType    String // EXTRACT | DECOMPOSE | PLAN | RESOLVE_CONFLICT
+  inputSummary  String
+  outputSummary String
+  evidence      String? // 原文依据，JSON 数组字符串（如 [{"quote":"...","field":"deadline"}]）
+  relatedTask   Task?    @relation(fields: [relatedTaskId], references: [id], onDelete: SetNull)
+  relatedTaskId String?
+  createdAt     DateTime @default(now())
+
+  @@index([actionType])
+  @@index([relatedTaskId])
+}
