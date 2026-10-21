@@ -4,7 +4,70 @@
 
 ## 当前阶段
 
-S3 · 任务板 + AI 任务拆解
+S4 · 课表 + 基础智能排期
+
+## S4 当前能力
+
+- `/schedule` 周视图：横向 周一 → 周日，纵向 08:00-22:00，CSS Grid + 绝对定位自绘（不引入 FullCalendar）
+- 固定课程块、正式日程块、预览块三种视觉层级；点击任意块查看 rationale
+- 「生成计划」：只生成预览，不写数据库；预览块为虚线条
+- 「确认此计划」：服务端重新查询数据库并逐条复核约束，事务写入 `Schedule(status=CONFIRMED)` 与 `DecisionLog(PLAN)`
+- 未能安排的对象进入「未安排项目」列表并给出具体原因（缺截止时间 / 截止已过 / 时段不足 / 依赖未满足）
+- 重复确认同一对象会被拒绝（409），不会生成第二套计划
+- 不做 S5 的冲突制造、自动重排与拖拽
+
+### PlanningEngine 架构
+
+```
+Task / SubTask / Dependency / Course / 已有 Schedule
+        ↓ loadPlanningContext（每次预览/确认都重新读库）
+    PlanningItem[]
+        ↓ buildPlanningItems（情况 A/B 去重、跳过 DONE 与已排期）
+   确定性 PlanningEngine（纯函数）
+        ↓
+     PlanPreview（Zod 校验）
+        ↓ 用户人工确认
+   服务端二次校验（owner/时间/课程/日程/依赖/总时长等）
+        ↓ Prisma transaction
+ Schedule(CONFIRMED) + DecisionLog(PLAN)
+```
+
+- `src/lib/time.ts`：Asia/Shanghai 时间工具（固定 UTC+8，无日期库）
+- `src/lib/planning/contract.ts`：PlanningItem / PlanBlock / PlanPreview / confirm 入参 Zod 契约
+- `src/lib/planning/engine.ts`：纯函数贪心排期引擎，不访问数据库、不调用 LLM
+- `src/lib/services/schedule.ts`：读取上下文、生成预览、确认校验与事务写入
+
+### 为什么不用 LLM 直接决定时间
+
+LLM 擅长理解语义，但不能保证时间约束绝对正确。排期必须可测试、可复现、可解释：
+同一输入必须产生同一结果。因此 S4 的时间决策全部由确定性规则引擎完成；
+后续接入真实 LLM 时，LLM 可以负责解释排期原因，但不能绕过约束引擎。
+
+### 时间约束
+
+- 统一时区 Asia/Shanghai（UTC+8，无夏令时）
+- 可安排区间 08:00-22:00，最小粒度 30 分钟
+- 不排到过去，不超过 `Task.deadline`
+- 不与固定课程重叠、不与已有有效日程重叠
+- 区间语义为半开区间 `[start, end)`：10:00-11:00 与 11:00-12:00 不算冲突
+
+### 排期规则
+
+- 情况 A：Task 无 SubTask → 排 Task 本身
+- 情况 B：Task 已有 SubTask → 只排 SubTask，父 Task 不重复排
+- 已完成（DONE）对象、已有有效日程的对象不再安排
+- 缺截止时间 / 缺预计耗时的对象进入 unscheduled 并写明原因
+- 排序：deadline 早 → priority HIGH > MEDIUM > LOW → ownerId（保证确定性）
+- 长任务拆块：单块 30~120 分钟，总时长按「预计耗时向上取整到 30 分钟」核对
+- 依赖：后续子任务不得早于所有前置完成时间；多个前置须全部完成
+- 找不到合法时段时进入 unscheduled，不强行安排
+
+### preview → human confirm → database
+
+1. `POST /api/schedule/preview`：只读数据库，返回 `PlanPreview`，不写任何记录
+2. 前端展示虚线预览块，用户点击「确认此计划」
+3. `POST /api/schedule/confirm`：重新查询 Task/SubTask/Course/Schedule，逐条校验 owner 合法性、时长粒度、过去/截止/范围、课程与日程重叠、块间重叠、依赖顺序、总时长与重复确认
+4. 校验通过后单事务写入 `Schedule` 与 `DecisionLog(PLAN)`，任一步失败整体回滚
 
 ## S3 当前能力
 
@@ -46,6 +109,7 @@ AI 仅提出建议，人工确认后才进入正式数据；`MockAIProvider` 仍
 npm run db:verify   # S1 数据层关联验证
 npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清理）
 npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
+npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
 ```
 
 ## AIProvider 架构
