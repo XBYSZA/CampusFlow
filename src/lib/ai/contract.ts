@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { findDependencyCycle } from "@/lib/domain";
 
 // ============================================================
 // AI 提取契约（S2）
@@ -134,4 +135,108 @@ export function priorityFromDomain(priority: string): ContractPriority {
   const lower = priority.toLowerCase();
   if (lower === "low" || lower === "medium" || lower === "high") return lower;
   return "medium";
+}
+
+// ============================================================
+// AI 任务拆解契约（S3）
+// 延续 S2 原则：AI 只提出建议，人工确认后才写入正式数据。
+// ============================================================
+
+export const DECOMPOSITION_MIN_SUBTASKS = 2;
+export const DECOMPOSITION_MAX_SUBTASKS = 8;
+
+// clientId：拆解结果内部的临时标识，必须唯一，不使用数据库 ID
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+export const proposedSubTaskSchema = z.object({
+  clientId: z
+    .string()
+    .regex(CLIENT_ID_RE, "clientId 只能包含字母、数字、下划线或连字符，长度 1~40"),
+  title: z.string().trim().min(1, "子任务标题不能为空").max(100),
+  description: z.string().max(500).optional(),
+  estimatedMinutes: z
+    .number()
+    .int()
+    .min(ESTIMATED_MINUTES_MIN)
+    .max(ESTIMATED_MINUTES_MAX),
+  sortOrder: z.number().int().min(0).max(99),
+  // dependsOn 只能引用同一次拆解结果里存在的 clientId
+  dependsOn: z.array(z.string().regex(CLIENT_ID_RE)).max(DECOMPOSITION_MAX_SUBTASKS),
+});
+
+export type ProposedSubTask = z.infer<typeof proposedSubTaskSchema>;
+
+export const decompositionResultSchema = z.object({
+  taskSummary: z.string().min(1).max(500),
+  subtasks: z
+    .array(proposedSubTaskSchema)
+    .min(DECOMPOSITION_MIN_SUBTASKS)
+    .max(DECOMPOSITION_MAX_SUBTASKS),
+});
+
+export type DecompositionResult = z.infer<typeof decompositionResultSchema>;
+
+// confirm-decomposition 入参：只提交用户编辑后的子任务列表
+export const confirmDecompositionPayloadSchema = z.object({
+  subtasks: z
+    .array(proposedSubTaskSchema)
+    .min(DECOMPOSITION_MIN_SUBTASKS)
+    .max(DECOMPOSITION_MAX_SUBTASKS),
+});
+
+export type ConfirmDecompositionPayload = z.infer<typeof confirmDecompositionPayloadSchema>;
+
+/**
+ * 拆解结果的依赖图校验（服务端最终裁决，前端提示不算数）。
+ * 覆盖：clientId 唯一 / dependsOn 必须存在 / 禁止自依赖 / 禁止环（复用 S1 findDependencyCycle）。
+ * 返回问题列表，空数组表示通过。
+ */
+export function validateDecomposition(result: DecompositionResult): string[] {
+  const problems: string[] = [];
+  const ids = new Set<string>();
+
+  for (const st of result.subtasks) {
+    if (ids.has(st.clientId)) {
+      problems.push(`clientId 重复：${st.clientId}`);
+    }
+    ids.add(st.clientId);
+  }
+
+  // sortOrder 必须唯一，保证展示顺序稳定
+  const seenOrders = new Set<number>();
+  for (const st of result.subtasks) {
+    if (seenOrders.has(st.sortOrder)) {
+      problems.push(`sortOrder 重复：${st.sortOrder}`);
+    }
+    seenOrders.add(st.sortOrder);
+  }
+
+  for (const st of result.subtasks) {
+    for (const dep of st.dependsOn) {
+      if (dep === st.clientId) {
+        problems.push(`子任务「${st.title}」不能依赖自己`);
+      } else if (!ids.has(dep)) {
+        problems.push(`子任务「${st.title}」依赖了不存在的 clientId：${dep}`);
+      }
+    }
+  }
+
+  // 环检测：只把合法的引用交给 S1 的通用算法，避免两套冲突逻辑
+  const edges = result.subtasks.flatMap((st) =>
+    st.dependsOn.filter((dep) => ids.has(dep) && dep !== st.clientId).map((dep) => ({
+      subTaskId: st.clientId,
+      dependsOnId: dep,
+    })),
+  );
+  const cycle = findDependencyCycle(edges);
+  if (cycle) {
+    problems.push(`依赖关系存在环：${cycle.subTaskId} → ${cycle.dependsOnId}`);
+  }
+
+  return problems;
+}
+
+/** 按 sortOrder 升序返回子任务（不改变原数组），保证顺序稳定 */
+export function sortProposedSubTasks(subtasks: ProposedSubTask[]): ProposedSubTask[] {
+  return [...subtasks].sort((a, b) => a.sortOrder - b.sortOrder || a.clientId.localeCompare(b.clientId));
 }

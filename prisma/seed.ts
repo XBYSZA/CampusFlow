@@ -21,6 +21,9 @@ const DEMO_IDS = {
   course2: "course_advanced_math_mon",
   schedule1: "sched_write_proposal_1022",
   decisionLog1: "dlog_extract_contest_001",
+  // S3：一个尚未拆解的任务，用于演示 AI 拆解流程
+  source2: "src_course_design_report_2026",
+  task2: "task_data_structure_report_2026",
 } as const;
 
 // 完全虚构的校园创新大赛通知样本（真实感强，无真实人名/邮箱/电话）
@@ -41,6 +44,23 @@ const DEMO_RAW_TEXT = `【校学生会】关于举办2026年"校园创新大赛"
 2026年10月20日`;
 
 const DEADLINE_QUOTE = "报名及作品提交截止时间为2026年10月25日18:00";
+
+// 完全虚构的课程设计报告要求（S3 演示：尚未拆解的任务）
+const COURSE_REPORT_RAW_TEXT = `【课程通知】《数据结构》课程设计报告要求
+
+各位同学：
+
+本学期课程设计报告要求如下，请在截止时间前完成并提交。
+
+一、报告内容：题目分析、数据结构与算法设计、核心代码说明、测试结果与总结。
+二、格式要求：正文不超过 20 页，需附源代码清单与运行截图。
+三、提交方式：纸质版交至任课教师办公室，电子版发送至课程邮箱。
+四、提交截止时间为 2026 年 11 月 20 日 23:59，逾期不予受理。
+
+请合理安排时间，避免临近截止集中赶工。
+
+课程组
+2026 年 10 月 21 日`;
 
 async function main() {
   console.log("Seeding CampusFlow demo data (idempotent upsert)...");
@@ -82,6 +102,48 @@ async function main() {
       deadline: new Date("2026-10-25T18:00:00+08:00"),
       priority: "HIGH",
       estimatedMinutes: 240,
+      status: "TODO",
+    },
+  });
+
+  // 2b. S3 演示用：一个尚未拆解的任务（课程设计报告），供 /tasks 演示 AI 拆解
+  await prisma.source.upsert({
+    where: { id: DEMO_IDS.source2 },
+    update: {
+      title: "《数据结构》课程设计报告要求（演示样本）",
+      rawText: COURSE_REPORT_RAW_TEXT,
+      sourceType: "COURSE_NOTICE",
+    },
+    create: {
+      id: DEMO_IDS.source2,
+      title: "《数据结构》课程设计报告要求（演示样本）",
+      rawText: COURSE_REPORT_RAW_TEXT,
+      sourceType: "COURSE_NOTICE",
+      capturedAt: new Date("2026-10-21T10:00:00+08:00"),
+    },
+  });
+
+  await prisma.task.upsert({
+    where: { id: DEMO_IDS.task2 },
+    update: {
+      sourceId: DEMO_IDS.source2,
+      title: "完成《数据结构》课程设计报告",
+      description:
+        "按课程要求完成设计报告：含题目分析、数据结构与算法设计、测试结果与总结，并在截止前提交纸质版与电子版",
+      deadline: new Date("2026-11-20T23:59:00+08:00"),
+      priority: "MEDIUM",
+      estimatedMinutes: 300,
+      status: "TODO",
+    },
+    create: {
+      id: DEMO_IDS.task2,
+      sourceId: DEMO_IDS.source2,
+      title: "完成《数据结构》课程设计报告",
+      description:
+        "按课程要求完成设计报告：含题目分析、数据结构与算法设计、测试结果与总结，并在截止前提交纸质版与电子版",
+      deadline: new Date("2026-11-20T23:59:00+08:00"),
+      priority: "MEDIUM",
+      estimatedMinutes: 300,
       status: "TODO",
     },
   });

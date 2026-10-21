@@ -4,7 +4,32 @@
 
 ## 当前阶段
 
-S2 · 智能收件箱（Mock AI 提取）
+S3 · 任务板 + AI 任务拆解
+
+## S3 当前能力
+
+- `/tasks` 左侧任务列表（截止 / 优先级 / 状态 / 来源）、右侧任务详情（描述、来源与原文依据、子任务）
+- 「AI 拆解任务」生成拆解预览：子任务标题、预计耗时、顺序与依赖关系
+- 确认前可编辑：子任务标题、预计耗时、依赖关系（可调整或取消）
+- 「确认拆解」后事务写入 SubTask + SubTaskDependency + DecisionLog（DECOMPOSE）
+- 已拆解任务展示正式子任务，不支持重复拆解或覆盖（服务端 409）
+- 演示数据内置一个尚未拆解的任务（《数据结构》课程设计报告），便于直接演示
+
+### 拆解流程
+
+```
+Task → AI decompose → DecompositionResult（Zod 校验 + 依赖 DAG 校验）
+     → 用户人工编辑 → 服务端再次校验 → Prisma transaction 入库 → DecisionLog 留痕
+```
+
+### 子任务依赖约束
+
+- `dependsOn` 只能引用同一次拆解结果内的 `clientId`（禁止用数据库 ID 直接提交）
+- 禁止自依赖、禁止引用不存在的节点、禁止成环（复用 S1 的 `findDependencyCycle`）
+- 子任务数量 2~8，预计耗时 15~480 分钟，`sortOrder` 唯一
+- **最终判断在服务端执行**，前端提示只是辅助
+
+AI 仅提出建议，人工确认后才进入正式数据；`MockAIProvider` 仍只是开发期 Provider。
 
 ## S2 当前能力
 
@@ -20,6 +45,7 @@ S2 · 智能收件箱（Mock AI 提取）
 ```bash
 npm run db:verify   # S1 数据层关联验证
 npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清理）
+npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
 ```
 
 ## AIProvider 架构
