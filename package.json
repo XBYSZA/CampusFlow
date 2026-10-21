@@ -15,7 +15,8 @@
     "db:verify": "tsx scripts/verify-s1.ts",
     "s2:verify": "tsx scripts/verify-s2.ts",
     "s3:verify": "tsx scripts/verify-s3.ts",
-    "s4:verify": "tsx scripts/verify-s4.ts"
+    "s4:verify": "tsx scripts/verify-s4.ts",
+    "s5:verify": "tsx scripts/verify-s5.ts"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.10.1",

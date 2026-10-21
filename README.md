@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-S4 · 课表 + 基础智能排期
+S5 · 冲突检测 + 自动重排
 
 ## S4 当前能力
 
@@ -69,6 +69,60 @@ LLM 擅长理解语义，但不能保证时间约束绝对正确。排期必须�
 3. `POST /api/schedule/confirm`：重新查询 Task/SubTask/Course/Schedule，逐条校验 owner 合法性、时长粒度、过去/截止/范围、课程与日程重叠、块间重叠、依赖顺序、总时长与重复确认
 4. 校验通过后单事务写入 `Schedule` 与 `DecisionLog(PLAN)`，任一步失败整体回滚
 
+## S5 当前能力
+
+### CalendarEvent 与 Course 的区别
+
+- `Course`：按周重复的固定课程（dayOfWeek + startMinute/endMinute），作为排期硬约束
+- `CalendarEvent`（S5 新增）：一次性固定占用（startAt/endAt），例如"周四 19:00-20:30 学院讲座"
+- 两者都不可被排期引擎移动，但 CalendarEvent 只发生一次
+
+### 冲突检测
+
+- 纯函数 `detectConflicts()`：输入有效 Schedule + Course + CalendarEvent，复用 S4 的 `[start,end)` 半开区间重叠规则（`a.start < b.end && b.start < a.end`）
+- 支持 Schedule vs Course、Schedule vs CalendarEvent 两类冲突；边界相接（19:00 与 19:00）不算冲突
+- `runConflictDetection()`：按 `(scheduleAId, 固定占用)` 应用层去重，同一未解决组合不会重复写入
+- `CANCELLED` 状态的 Schedule 不参与检测（与 S4 effective = `status != CANCELLED` 一致）
+- 冲突描述来自真实时间数据，例如："「完成方案初稿」原计划 19:00-21:00，与临时事件「学院讲座」19:30-20:30 重叠 60 分钟。"
+
+### detect → preview → human confirm → replan
+
+1. 用户在 `/schedule` 点击「添加临时事件」，填写标题/日期/起止时间/地点，提交后服务端校验 `startAt < endAt`，创建 `CalendarEvent` 并立即运行冲突检测
+2. 页面显示"发现 N 个计划冲突"，被影响的正式 Schedule 以红色高亮
+3. 点击「重新规划」→ `POST /api/schedule/replan-preview`：服务端计算受影响 owner 集合，**只对这些 owner 重新排期**，其余 Schedule 作为固定占用保留
+4. 页面展示原计划 → 建议新计划对比，每个新块附带真实约束生成的 rationale
+5. 用户确认 → `POST /api/schedule/replan-confirm`：服务端重新查询并逐条复核 12 类约束，单事务写入
+
+### 受影响 owner 与下游依赖
+
+- 直接冲突 owner ∪ 其下游依赖 owner 的传递闭包（B 依赖 A，A 被移动则 B 也进入受影响集合）
+- 未受影响 Schedule 仍作为固定占用；受影响 owner 的旧 Schedule 在 preview 排期时从占用中移除，但数据库中保留
+
+### 重排如何复用 PlanningEngine
+
+- `generateReplanPreview()` 复用 S4 的 `planSchedule()` 纯函数，不重写时间算法
+- 输入：受影响 owner 的 PlanningItem[]、课程、busy（未受影响 Schedule + CalendarEvent）、dependencyReadyAt（未受影响已排 owner 的完成时间）
+- 输出的新块在原 rationale 前追加冲突原因（直接冲突："原计划与固定占用发生冲突…"；下游联动："由于前置任务完成时间延后…"）
+- 找不到合法时段时返回 unresolved，不强行安排
+
+### 为什么旧 Schedule 不删除
+
+- 确认重排时，被替代的旧 Schedule `status` 改为 `CANCELLED`（不 delete），新 Schedule 以 `CONFIRMED` 创建
+- 这样旧计划仍保留在数据库历史里，但不再属于有效占用（与 S4 effective 语义一致）
+- 不新增 `MOVED` 状态，避免破坏现有有效 Schedule 语义
+
+### Conflict 如何保留 before/after
+
+- `Conflict.resolution` 保存可读的前后变化摘要（哪些块从何时段移至何时段）
+- `Conflict.resolvedAt` 标记解决时间；为空表示未解决
+- 重排确认时创建 `DecisionLog(actionType=REPLAN)`，记录冲突摘要、旧/新 Schedule 摘要、受影响 owner 数量与约束
+
+### 事务与重复确认保护
+
+- `replan-confirm` 单事务内：二次校验冲突仍未解决 → 旧 Schedule 仍有效 → 旧 Schedule 改 CANCELLED → 创建新 Schedule → 更新 Conflict.resolution/resolvedAt → 写 DecisionLog
+- 任一步失败整体回滚，不会出现"旧计划取消了但新计划没创建"的半状态
+- 重复确认同一冲突会被以 `CONFLICT_ALREADY_RESOLVED` 拒绝
+
 ## S3 当前能力
 
 - `/tasks` 左侧任务列表（截止 / 优先级 / 状态 / 来源）、右侧任务详情（描述、来源与原文依据、子任务）
@@ -110,6 +164,7 @@ npm run db:verify   # S1 数据层关联验证
 npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清理）
 npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
 npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
+npm run s5:verify   # S5 冲突检测与重排验证（CalendarEvent/检测/受影响集合/预览/确认事务/清理）
 ```
 
 ## AIProvider 架构

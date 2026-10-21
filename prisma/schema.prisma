@@ -97,6 +97,23 @@ model Course {
   @@index([dayOfWeek])
 }
 
+// 一次性固定事件（S5）：不可由排期引擎移动的临时占用
+// 例如"周四 19:00-20:30 学院讲座"、"周六 14:00-16:00 社团活动"
+// 与 Course 的区别：Course 按周重复；CalendarEvent 只在指定时间段发生一次
+model CalendarEvent {
+  id        String   @id @default(cuid())
+  title     String
+  startAt   DateTime
+  endAt     DateTime
+  location  String?
+  eventType String   @default("OTHER") // LECTURE | MEETING | CLUB | OTHER
+  createdAt DateTime @default(now())
+
+  conflicts Conflict[]
+
+  @@index([startAt])
+}
+
 // 计划日程：只能关联 Task 或 SubTask 之一（互斥约束在应用层校验，见 domain.validateScheduleOwner）
 model Schedule {
   id        String   @id @default(cuid())
@@ -118,25 +135,29 @@ model Schedule {
   @@index([startAt])
 }
 
-// 冲突记录：scheduleA 必填；第二参与方为另一个日程（scheduleB）或课程（course），
-// 二者必须二选一（应用层校验，见 domain.validateConflictParticipants）
+// 冲突记录：scheduleA 为被影响的正式日程；固定占用方为 course 或 calendarEvent 之一
+// （应用层校验，见 domain.validateConflictParticipants）
+// resolvedAt 为空表示未解决；同一 (scheduleA, 固定占用) 未解决组合应用层去重
 model Conflict {
-  id           String    @id @default(cuid())
-  scheduleA    Schedule  @relation("scheduleA", fields: [scheduleAId], references: [id], onDelete: Cascade)
-  scheduleAId  String
-  scheduleB    Schedule? @relation("scheduleB", fields: [scheduleBId], references: [id], onDelete: Cascade)
-  scheduleBId  String?
-  course       Course?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId     String?
-  conflictType String // OVERLAP | DEADLINE_RISK
-  description  String
-  resolution   String?
-  resolvedAt   DateTime?
-  createdAt    DateTime  @default(now())
+  id             String    @id @default(cuid())
+  scheduleA      Schedule  @relation("scheduleA", fields: [scheduleAId], references: [id], onDelete: Cascade)
+  scheduleAId    String
+  scheduleB      Schedule? @relation("scheduleB", fields: [scheduleBId], references: [id], onDelete: Cascade)
+  scheduleBId    String?
+  course         Course?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId       String?
+  calendarEvent  CalendarEvent? @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+  calendarEventId String?
+  conflictType   String // OVERLAP | DEADLINE_RISK
+  description    String
+  resolution     String?
+  resolvedAt     DateTime?
+  createdAt      DateTime @default(now())
 
   @@index([scheduleAId])
   @@index([scheduleBId])
   @@index([courseId])
+  @@index([calendarEventId])
   @@index([conflictType])
 }
 

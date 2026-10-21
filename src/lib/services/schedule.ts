@@ -16,6 +16,8 @@ import {
   type PlanPreview,
   type PlanningItem,
   type UnscheduledItem,
+  type WeekCalendarEventBlock,
+  type WeekConflictView,
   type WeekCourseBlock,
   type WeekDay,
   type WeekScheduleView,
@@ -359,12 +361,46 @@ export interface WeekScheduleResult extends WeekScheduleView {
   now: string;
 }
 
-/** 周视图数据：7 天课程 + 周内有效日程 + 待安排数量 */
+/** 周视图数据：7 天课程 + 周内有效日程 + 待安排数量 + 临时事件 + 冲突 */
 export async function getWeekSchedule(now: Date = new Date()): Promise<WeekScheduleResult> {
   const weekStart = weekStartMonday(now);
   const weekEnd = addDays(weekStart, 7);
   const context = await loadPlanningContext();
   const build = buildPlanningItems(context.tasks, context.scheduledOwnerIds);
+
+  const [calendarEvents, conflicts] = await Promise.all([
+    prisma.calendarEvent.findMany({
+      where: { endAt: { gt: weekStart }, startAt: { lt: weekEnd } },
+      orderBy: { startAt: "asc" },
+    }),
+    prisma.conflict.findMany({
+      include: {
+        scheduleA: {
+          select: {
+            id: true,
+            taskId: true,
+            subTaskId: true,
+            startAt: true,
+            endAt: true,
+            task: { select: { title: true } },
+            subTask: { select: { title: true } },
+          },
+        },
+        course: { select: { title: true } },
+        calendarEvent: { select: { title: true, startAt: true, endAt: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+
+  const allCalendarEvents: WeekCalendarEventBlock[] = calendarEvents.map((event) => ({
+    id: event.id,
+    title: event.title,
+    location: event.location,
+    eventType: event.eventType,
+    startAt: event.startAt.toISOString(),
+    endAt: event.endAt.toISOString(),
+  }));
 
   const days: WeekDay[] = [];
   for (let index = 0; index < 7; index += 1) {
@@ -401,8 +437,39 @@ export async function getWeekSchedule(now: Date = new Date()): Promise<WeekSched
         rationale: schedule.rationale,
       }));
 
-    days.push({ dateKey: dateKey(dayStart), weekday, courses, schedules });
+    const dayCalendarEvents = calendarEvents
+      .filter(
+        (event) =>
+          event.startAt.getTime() < dayEnd.getTime() &&
+          event.endAt.getTime() > dayStart.getTime(),
+      )
+      .map((event) => ({
+        id: event.id,
+        title: event.title,
+        location: event.location,
+        eventType: event.eventType,
+        startAt: event.startAt.toISOString(),
+        endAt: event.endAt.toISOString(),
+      }));
+
+    days.push({ dateKey: dateKey(dayStart), weekday, courses, schedules, calendarEvents: dayCalendarEvents });
   }
+
+  const conflictViews: WeekConflictView[] = conflicts.map((c) => ({
+    id: c.id,
+    scheduleId: c.scheduleA.id,
+    scheduleOwnerId: c.scheduleA.subTaskId ?? c.scheduleA.taskId ?? "",
+    scheduleTitle: c.scheduleA.subTask?.title ?? c.scheduleA.task?.title ?? "未命名日程",
+    scheduleStartAt: c.scheduleA.startAt.toISOString(),
+    scheduleEndAt: c.scheduleA.endAt.toISOString(),
+    courseTitle: c.course?.title ?? null,
+    calendarEventTitle: c.calendarEvent?.title ?? null,
+    calendarEventStartAt: c.calendarEvent?.startAt?.toISOString() ?? null,
+    calendarEventEndAt: c.calendarEvent?.endAt?.toISOString() ?? null,
+    conflictType: c.conflictType,
+    description: c.description,
+    resolved: c.resolvedAt !== null,
+  }));
 
   return {
     weekStart: weekStart.toISOString(),
@@ -410,6 +477,8 @@ export async function getWeekSchedule(now: Date = new Date()): Promise<WeekSched
     days,
     pendingCount: build.items.length,
     now: now.toISOString(),
+    calendarEvents: allCalendarEvents,
+    conflicts: conflictViews,
   };
 }
 

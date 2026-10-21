@@ -6,7 +6,8 @@ export const PRIORITIES = ["LOW", "MEDIUM", "HIGH"] as const;
 export const TASK_STATUSES = ["TODO", "IN_PROGRESS", "DONE"] as const;
 export const SCHEDULE_STATUSES = ["PROPOSED", "CONFIRMED", "MOVED", "CANCELLED"] as const;
 export const CONFLICT_TYPES = ["OVERLAP", "DEADLINE_RISK"] as const;
-export const DECISION_ACTIONS = ["EXTRACT", "DECOMPOSE", "PLAN", "RESOLVE_CONFLICT"] as const;
+export const DECISION_ACTIONS = ["EXTRACT", "DECOMPOSE", "PLAN", "RESOLVE_CONFLICT", "REPLAN"] as const;
+export const CALENDAR_EVENT_TYPES = ["LECTURE", "MEETING", "CLUB", "OTHER"] as const;
 
 export type SourceType = (typeof SOURCE_TYPES)[number];
 export type Priority = (typeof PRIORITIES)[number];
@@ -58,14 +59,48 @@ export function validateScheduleOwner(input: ScheduleOwnerInput): string | null 
 }
 
 // Conflict 参与方校验：scheduleA 必填（数据库层保证），
-// 第二参与方 scheduleB 与 course 必须恰好二选一（应用层保证）
-export type ConflictParticipantsInput = { scheduleBId?: string | null; courseId?: string | null };
+// 固定占用方 scheduleB / course / calendarEvent 必须恰好三选一（应用层保证）
+export type ConflictParticipantsInput = {
+  scheduleBId?: string | null;
+  courseId?: string | null;
+  calendarEventId?: string | null;
+};
 
 export function validateConflictParticipants(input: ConflictParticipantsInput): string | null {
   const hasScheduleB = typeof input.scheduleBId === "string" && input.scheduleBId.length > 0;
   const hasCourse = typeof input.courseId === "string" && input.courseId.length > 0;
-  if (hasScheduleB && hasCourse) return "Conflict 第二参与方只能选择 Schedule 或 Course 之一";
-  if (!hasScheduleB && !hasCourse) return "Conflict 必须包含第二参与方（Schedule 或 Course）";
+  const hasCalendarEvent =
+    typeof input.calendarEventId === "string" && input.calendarEventId.length > 0;
+  const count = [hasScheduleB, hasCourse, hasCalendarEvent].filter(Boolean).length;
+  if (count === 0) return "Conflict 必须包含固定占用方（Schedule / Course / CalendarEvent）";
+  if (count > 1) return "Conflict 固定占用方只能选择 Schedule、Course 或 CalendarEvent 之一";
+  return null;
+}
+
+// CalendarEvent 校验：标题非空，startAt < endAt
+export type CalendarEventInput = {
+  title: string;
+  startAt: Date;
+  endAt: Date;
+  eventType?: string;
+};
+
+export function validateCalendarEvent(input: CalendarEventInput): string | null {
+  if (typeof input.title !== "string" || input.title.trim().length === 0) {
+    return "CalendarEvent 标题不能为空";
+  }
+  if (!(input.startAt instanceof Date) || Number.isNaN(input.startAt.getTime())) {
+    return "CalendarEvent startAt 非法";
+  }
+  if (!(input.endAt instanceof Date) || Number.isNaN(input.endAt.getTime())) {
+    return "CalendarEvent endAt 非法";
+  }
+  if (input.endAt.getTime() <= input.startAt.getTime()) {
+    return "CalendarEvent endAt 必须晚于 startAt";
+  }
+  if (input.eventType !== undefined && !isValidEnum(CALENDAR_EVENT_TYPES, input.eventType)) {
+    return `CalendarEvent eventType 非法：${input.eventType}`;
+  }
   return null;
 }
 

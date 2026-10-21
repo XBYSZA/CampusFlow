@@ -74,6 +74,37 @@ export const confirmPlanPayloadSchema = z.object({
 export type ConfirmPlanPayload = z.infer<typeof confirmPlanPayloadSchema>;
 
 // ============================================================
+// 重排预览（S5）
+// 只针对受冲突影响的 owner 重新排期；旧计划仅展示，不会在 preview 阶段删除。
+// ============================================================
+
+export interface ReplanOldBlock {
+  scheduleId: string;
+  ownerId: string;
+  title: string;
+  startAt: string;
+  endAt: string;
+}
+
+export interface ReplanAffectedOwner {
+  ownerType: OwnerType;
+  ownerId: string;
+  title: string;
+}
+
+export interface ReplanPreview {
+  generatedAt: string;
+  rangeStart: string;
+  rangeEnd: string;
+  conflictIds: string[];
+  affectedOwners: ReplanAffectedOwner[];
+  oldBlocks: ReplanOldBlock[];
+  newBlocks: PlanBlock[];
+  unresolved: UnscheduledItem[];
+  explanations: string[];
+}
+
+// ============================================================
 // 周视图数据（GET /api/schedule）
 // 纯数据结构，不含服务端依赖，页面只 import type 使用。
 // ============================================================
@@ -107,6 +138,32 @@ export interface WeekDay {
   weekday: number;
   courses: WeekCourseBlock[];
   schedules: WeekScheduleBlock[];
+  calendarEvents: WeekCalendarEventBlock[];
+}
+
+export interface WeekCalendarEventBlock {
+  id: string;
+  title: string;
+  location: string | null;
+  eventType: string;
+  startAt: string;
+  endAt: string;
+}
+
+export interface WeekConflictView {
+  id: string;
+  scheduleId: string;
+  scheduleOwnerId: string;
+  scheduleTitle: string;
+  scheduleStartAt: string;
+  scheduleEndAt: string;
+  courseTitle: string | null;
+  calendarEventTitle: string | null;
+  calendarEventStartAt: string | null;
+  calendarEventEndAt: string | null;
+  conflictType: string;
+  description: string;
+  resolved: boolean;
 }
 
 export interface WeekScheduleView {
@@ -115,6 +172,8 @@ export interface WeekScheduleView {
   days: WeekDay[];
   /** 当前待安排（尚未有正式日程、未完成）的对象数量 */
   pendingCount: number;
+  calendarEvents: WeekCalendarEventBlock[];
+  conflicts: WeekConflictView[];
 }
 
 /** 由于 30 分钟粒度，估算时长向上取整到 30 的倍数 */
