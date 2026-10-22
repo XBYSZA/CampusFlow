@@ -1,301 +1,109 @@
 # CampusFlow
 
-把校园信息变成可解释的行动计划 —— 面向大学生的校园事务智能规划与执行助手。
+把碎片化校园信息转化为**可解释、可执行、可调整**的行动计划。
 
-## 当前阶段
+## 1. 项目简介
 
-S7 · 全局决策解释抽屉 + 产品演示打磨
+CampusFlow 面向校园通知、比赛、课程与活动场景。它解决的问题是：**通知很多，但真正困难的是知道要做什么、什么时候做，以及计划变化后怎么办。**
 
-## S7 当前能力
-
-- 全局「决策解释抽屉」：Inbox / Tasks / Schedule 三个页面共用同一条决策解释链，不设独立 /explain 页面
-- 统一聚合 API：`GET /api/decisions/task/[taskId]`，把一个任务的 Source / Evidence / DecisionLog / SubTask / Schedule / Conflict 聚合为一条 `DecisionTimeline`
-- 阶段缺失自动跳过：任务未拆解或未发生过重排时，对应阶段不显示，接口不报错
-- AI 调用上下文（provider / model / promptVersion / 耗时）仅作展示与调试，**不是审计证据**
-- 全局统一页面壳（左侧导航：智能收件箱 / 任务板 / 智能日程），首页为三个入口卡片
-
-### 三种角色一眼可辨
-
-| 角色 | 负责 | 对应阶段 |
-| --- | --- | --- |
-| AI | 信息理解、任务拆解 | EXTRACT / DECOMPOSE |
-| 规则引擎 | 时间排期、冲突检测、重排 | PLAN / REPLAN |
-| 人工 | 确认提取、拆解、计划、重排 | 每个正式结果写入前 |
-
-抽屉中每个阶段都带角色徽标与颜色区分，评委可以直接看出「不是所有事情都扔给 LLM」。
-
-### DecisionLog → DecisionTimeline
-
-S2-S6 各阶段写入的 `DecisionLog`（EXTRACT / DECOMPOSE / PLAN / REPLAN）是结构化留痕；S7 在服务端把它们聚合成统一的 `DecisionTimeline` 展示契约（Zod 校验）：
-
-- EXTRACT：识别出的任务字段 + evidence quote + 原文上下文 + AI 调用上下文
-- DECOMPOSE：①②③ 子任务顺序、预计耗时与依赖关系（纯文本展示，不引入 React Flow）
-- PLAN：排期策略 + 每个计划块的时间段与 rationale（取自 DecisionLog / Schedule，不重新生成）
-- REPLAN：触发冲突 → 固定占用方 → 原计划（已取消，保留历史）→ 新计划（已确认）的 old → new 对照
-
-### 为什么不让 LLM 生成排期解释
-
-排期解释必须经得起复核：时间段、课程占用、依赖就绪时间都是数据库中的事实。如果让 LLM 临场编理由，可能出现与真实约束不一致的「合理化幻觉」。因此 PLAN / REPLAN 阶段的所有解释均直接取自 `DecisionLog.evidence` 与 `Schedule.rationale`——这些文字在排期发生时由确定性规则引擎根据真实约束生成，S7 只做展示，不做再创作。
-
-### S7 验证
-
-`npm run s7:verify` 在独立临时 SQLite 库上运行 17 项检查：来源聚合、evidence quote、四类阶段的角色映射、CANCELLED / CONFIRMED 历史区分、冲突 old → new 映射、无来源 / 无日志 / 阶段缺失容错、aiContext 非审计证据、契约校验与精确清理，全程不触碰开发数据库。
-
-## S4 当前能力
-
-- `/schedule` 周视图：横向 周一 → 周日，纵向 08:00-22:00，CSS Grid + 绝对定位自绘（不引入 FullCalendar）
-- 固定课程块、正式日程块、预览块三种视觉层级；点击任意块查看 rationale
-- 「生成计划」：只生成预览，不写数据库；预览块为虚线条
-- 「确认此计划」：服务端重新查询数据库并逐条复核约束，事务写入 `Schedule(status=CONFIRMED)` 与 `DecisionLog(PLAN)`
-- 未能安排的对象进入「未安排项目」列表并给出具体原因（缺截止时间 / 截止已过 / 时段不足 / 依赖未满足）
-- 重复确认同一对象会被拒绝（409），不会生成第二套计划
-- 不做 S5 的冲突制造、自动重排与拖拽
-
-### PlanningEngine 架构
+产品闭环：
 
 ```
-Task / SubTask / Dependency / Course / 已有 Schedule
-        ↓ loadPlanningContext（每次预览/确认都重新读库）
-    PlanningItem[]
-        ↓ buildPlanningItems（情况 A/B 去重、跳过 DONE 与已排期）
-   确定性 PlanningEngine（纯函数）
+通知 / 非结构化文本
+        ↓ AI 信息理解
+任务提取 + Evidence（原文依据）
+        ↓ Human Confirm
+AI 任务拆解（子任务 + 依赖）
+        ↓ Human Confirm
+Rule Engine 排期（确定性约束求解）
+        ↓ Human Confirm
+CalendarEvent / Conflict 冲突检测
         ↓
-     PlanPreview（Zod 校验）
-        ↓ 用户人工确认
-   服务端二次校验（owner/时间/课程/日程/依赖/总时长等）
-        ↓ Prisma transaction
- Schedule(CONFIRMED) + DecisionLog(PLAN)
+Deterministic Replan（确定性重排）
+        ↓ Human Confirm
+Task Complete（完成闭环）
+        ↓
+DecisionTimeline 全程可解释
 ```
 
-- `src/lib/time.ts`：Asia/Shanghai 时间工具（固定 UTC+8，无日期库）
-- `src/lib/planning/contract.ts`：PlanningItem / PlanBlock / PlanPreview / confirm 入参 Zod 契约
-- `src/lib/planning/engine.ts`：纯函数贪心排期引擎，不访问数据库、不调用 LLM
-- `src/lib/services/schedule.ts`：读取上下文、生成预览、确认校验与事务写入
+核心原则：**AI 不负责排期。** 所有时间决策由确定性规则引擎完成。
 
-### 为什么不用 LLM 直接决定时间
+## 2. AI × Rule Engine × Human
 
-LLM 擅长理解语义，但不能保证时间约束绝对正确。排期必须可测试、可复现、可解释：
-同一输入必须产生同一结果。因此 S4 的时间决策全部由确定性规则引擎完成；
-后续接入真实 LLM 时，LLM 可以负责解释排期原因，但不能绕过约束引擎。
+| 角色 | 职责 |
+| --- | --- |
+| **AI** | 非结构化信息理解、Task Extraction、Task Decomposition |
+| **Rule Engine** | 时间槽计算、Course / CalendarEvent 约束、Dependency、Deadline、Conflict Detection、Replanning |
+| **Human** | Confirm Extraction、Confirm Decomposition、Confirm Plan、Confirm Replan、Complete Task |
 
-### 时间约束
+**为什么这样分工**：LLM 适合语义理解，但时间区间、冲突、依赖、deadline 属于确定性约束。CampusFlow 采用「LLM for semantics，Deterministic engine for constraints」——收益是结果可重复、可验证、可解释，不会因为模型随机性产生重叠日程。
 
-- 统一时区 Asia/Shanghai（UTC+8，无夏令时）
-- 可安排区间 08:00-22:00，最小粒度 30 分钟
-- 不排到过去，不超过 `Task.deadline`
-- 不与固定课程重叠、不与已有有效日程重叠
-- 区间语义为半开区间 `[start, end)`：10:00-11:00 与 11:00-12:00 不算冲突
+**DecisionTimeline**：全局决策解释抽屉聚合真实系统中的 DecisionLog / Evidence / Schedule / Conflict 记录进行展示，**不调用 LLM 重新编造解释**。AI 调用上下文（provider / model / promptVersion / durationMs）仅作展示与调试，不是审计证据。
 
-### 排期规则
+## 3. 技术栈
 
-- 情况 A：Task 无 SubTask → 排 Task 本身
-- 情况 B：Task 已有 SubTask → 只排 SubTask，父 Task 不重复排
-- 已完成（DONE）对象、已有有效日程的对象不再安排
-- 缺截止时间 / 缺预计耗时的对象进入 unscheduled 并写明原因
-- 排序：deadline 早 → priority HIGH > MEDIUM > LOW → ownerId（保证确定性）
-- 长任务拆块：单块 30~120 分钟，总时长按「预计耗时向上取整到 30 分钟」核对
-- 依赖：后续子任务不得早于所有前置完成时间；多个前置须全部完成
-- 找不到合法时段时进入 unscheduled，不强行安排
+以 `package.json` 实际依赖为准：
 
-### preview → human confirm → database
+- **Next.js 16.4.2**（App Router / Turbopack）+ **React 19.3.0** + **TypeScript ^5**
+- **Tailwind CSS ^4** + ESLint
+- **Prisma 7.10.1** + **SQLite**（better-sqlite3 13）
+- **Zod ^4**（全链路契约校验）
+- **Native fetch**（RealAIProvider，OpenAI-compatible HTTP，可接 DeepSeek 等端点，不引入厂商 SDK / LangChain）
+- npm 包管理器
 
-1. `POST /api/schedule/preview`：只读数据库，返回 `PlanPreview`，不写任何记录
-2. 前端展示虚线预览块，用户点击「确认此计划」
-3. `POST /api/schedule/confirm`：重新查询 Task/SubTask/Course/Schedule，逐条校验 owner 合法性、时长粒度、过去/截止/范围、课程与日程重叠、块间重叠、依赖顺序、总时长与重复确认
-4. 校验通过后单事务写入 `Schedule` 与 `DecisionLog(PLAN)`，任一步失败整体回滚
+环境要求：Node.js ≥ 20.9（推荐 22+ LTS，在 v24.22.0 验证）、npm ≥ 10（在 11.19.1 验证）、Git ≥ 2.40。
 
-## S6 当前能力
+## 4. Quick Start
 
-- 在不改动 Inbox / Tasks 业务逻辑的前提下新增 `RealAIProvider`，任务提取与任务拆解可由真实大模型完成
-- `MockAIProvider` 保留为开发、离线演示与断网兜底，`AI_PROVIDER=mock` 时二阶段验证脚本仍全绿
-- 排期 / 冲突检测 / 重排时间决策**完全不经过 LLM**，仍由 S4/S5 的确定性引擎完成
-
-### Provider 结构
-
-```
-                 ┌─ MockAIProvider（规则引擎，默认）
-AIProvider ──────┤
-                 └─ RealAIProvider（OpenAI-compatible HTTP）
-        ↑
- Inbox Service / Tasks Service（只依赖接口，不依赖某家供应商）
-```
-
-### 两种模式
+面向第一次拿到仓库的评委。**默认 Mock 模式即可完整复现主要产品链路，无需任何 API Key。**
 
 ```bash
-# 1) Mock 模式（默认，无需任何密钥）
-AI_PROVIDER=mock
+# 1. Clone
+git clone https://github.com/XBYSZA/CampusFlow.git
+cd CampusFlow
+
+# 2. Install（postinstall 会自动生成 Prisma Client）
+npm install
+
+# 3. Environment：复制 .env.example 为 .env
+#    Windows PowerShell:
+copy .env.example .env
+#    macOS / Linux:
+#    cp .env.example .env
+#    默认 AI_PROVIDER=mock，不需要填写任何 Key
+
+# 4. Prepare demo database（重建迁移 + 演示基线，可重复执行）
+npm run db:demo
+
+# 5. Start
 npm run dev
 
-# 2) Real 模式（OpenAI-compatible 接口）
+# 6. Browser
+#    http://localhost:3000
+```
+
+从 clone 到页面可操作，全程不依赖 DeepSeek 等外部 API。
+
+## 5. Optional: Real LLM
+
+真实模型**不是**运行项目的必要条件，仅用于展示真实模型的 extraction / decomposition。在 `.env` 中配置：
+
+```bash
 AI_PROVIDER=real
 REAL_LLM_BASE_URL=https://<your-endpoint>/v1
 REAL_LLM_API_KEY=<your-key>
 REAL_LLM_MODEL=<your-model>
 REAL_LLM_TIMEOUT_MS=30000   # 可选，默认 30000
-npm run dev
 ```
 
-- 只读取服务端环境变量，不使用 `NEXT_PUBLIC_` 前缀，API Key 不会返回浏览器
-- `AI_PROVIDER=real` 但缺少必需配置时返回 `AI_CONFIG_INVALID`，**不会静默回退 Mock**
-- 真实密钥不要提交到 Git；`.env.example` 只保留空值模板
+- 当前实现为 OpenAI-compatible HTTP API（原生 fetch + AbortController 超时；网络/5xx 最多重试 1 次，4xx/schema/evidence 错误不重试）
+- **Real provider 只负责 extraction 与 decomposition**；Planning / Replanning 不受 provider 切换影响，仍由确定性引擎完成
+- `AI_PROVIDER=real` 但配置缺失时返回 `AI_CONFIG_INVALID`，**不会静默回退 Mock**
+- 只读取服务端环境变量（无 `NEXT_PUBLIC_` 前缀），Key 不进入浏览器；`.env` 不提交 Git，`.env.example` 仅含空值模板
 
-### 真实模型的职责边界
+## 6. Demo Notice（固定演示通知）
 
-- 只用于信息理解（提取任务、拆解子任务），不决定任何具体时间
-- 不直接操作数据库，不自动确认提取 / 拆解 / 重排
-- 结果仍要经过与 Mock 完全相同的 Zod 契约校验与 evidence 校验
-
-### Prompt 模板
-
-- [prompts.ts](src/lib/ai/prompts.ts) 集中管理提取与拆解 Prompt
-- `EXTRACTION_PROMPT_VERSION = "1.0"`、`DECOMPOSITION_PROMPT_VERSION = "1.0"`
-- DecisionLog 只记录版本号，不记录完整 Prompt（模板本身在 Git 仓库中）
-
-### 真实模型的 evidence 策略
-
-模型只返回 `quote`，服务端在原文中定位并计算 `start/end`，不信任模型自报的字符偏移：
-
-```
-模型输出 quote → 原文唯一命中 → 计算 start/end → 正式 Evidence → 复用 S2 校验
-              ├─ 0 次命中 → EVIDENCE_NOT_FOUND
-              └─ 多次命中 → EVIDENCE_AMBIGUOUS
-```
-
-### 错误与重试
-
-- `AI_CONFIG_INVALID` / `AI_REQUEST_FAILED` / `AI_TIMEOUT` / `AI_RESPONSE_INVALID` / `AI_SCHEMA_INVALID` / `EVIDENCE_NOT_FOUND` / `EVIDENCE_AMBIGUOUS`
-- 网络错误与 HTTP 5xx 最多自动重试 1 次；400 / 401 / 403 / schema / evidence 错误不重试
-- 请求使用 `AbortController` 超时（默认 30s），不会无限挂起
-
-### S6 验证
-
-```bash
-npm run s6:verify   # 离线验证（fetch 打桩，不访问互联网、不消耗 API）
-npm run s6:smoke    # 可选真实冒烟（未配置 real 时直接 SKIPPED）
-```
-
-## S5 当前能力
-
-### CalendarEvent 与 Course 的区别
-
-- `Course`：按周重复的固定课程（dayOfWeek + startMinute/endMinute），作为排期硬约束
-- `CalendarEvent`（S5 新增）：一次性固定占用（startAt/endAt），例如"周四 19:00-20:30 学院讲座"
-- 两者都不可被排期引擎移动，但 CalendarEvent 只发生一次
-
-### 冲突检测
-
-- 纯函数 `detectConflicts()`：输入有效 Schedule + Course + CalendarEvent，复用 S4 的 `[start,end)` 半开区间重叠规则（`a.start < b.end && b.start < a.end`）
-- 支持 Schedule vs Course、Schedule vs CalendarEvent 两类冲突；边界相接（19:00 与 19:00）不算冲突
-- `runConflictDetection()`：按 `(scheduleAId, 固定占用)` 应用层去重，同一未解决组合不会重复写入
-- `CANCELLED` 状态的 Schedule 不参与检测（与 S4 effective = `status != CANCELLED` 一致）
-- 冲突描述来自真实时间数据，例如："「完成方案初稿」原计划 19:00-21:00，与临时事件「学院讲座」19:30-20:30 重叠 60 分钟。"
-
-### detect → preview → human confirm → replan
-
-1. 用户在 `/schedule` 点击「添加临时事件」，填写标题/日期/起止时间/地点，提交后服务端校验 `startAt < endAt`，创建 `CalendarEvent` 并立即运行冲突检测
-2. 页面显示"发现 N 个计划冲突"，被影响的正式 Schedule 以红色高亮
-3. 点击「重新规划」→ `POST /api/schedule/replan-preview`：服务端计算受影响 owner 集合，**只对这些 owner 重新排期**，其余 Schedule 作为固定占用保留
-4. 页面展示原计划 → 建议新计划对比，每个新块附带真实约束生成的 rationale
-5. 用户确认 → `POST /api/schedule/replan-confirm`：服务端重新查询并逐条复核 12 类约束，单事务写入
-
-### 受影响 owner 与下游依赖
-
-- 直接冲突 owner ∪ 其下游依赖 owner 的传递闭包（B 依赖 A，A 被移动则 B 也进入受影响集合）
-- 未受影响 Schedule 仍作为固定占用；受影响 owner 的旧 Schedule 在 preview 排期时从占用中移除，但数据库中保留
-
-### 重排如何复用 PlanningEngine
-
-- `generateReplanPreview()` 复用 S4 的 `planSchedule()` 纯函数，不重写时间算法
-- 输入：受影响 owner 的 PlanningItem[]、课程、busy（未受影响 Schedule + CalendarEvent）、dependencyReadyAt（未受影响已排 owner 的完成时间）
-- 输出的新块在原 rationale 前追加冲突原因（直接冲突："原计划与固定占用发生冲突…"；下游联动："由于前置任务完成时间延后…"）
-- 找不到合法时段时返回 unresolved，不强行安排
-
-### 为什么旧 Schedule 不删除
-
-- 确认重排时，被替代的旧 Schedule `status` 改为 `CANCELLED`（不 delete），新 Schedule 以 `CONFIRMED` 创建
-- 这样旧计划仍保留在数据库历史里，但不再属于有效占用（与 S4 effective 语义一致）
-- 不新增 `MOVED` 状态，避免破坏现有有效 Schedule 语义
-
-### Conflict 如何保留 before/after
-
-- `Conflict.resolution` 保存可读的前后变化摘要（哪些块从何时段移至何时段）
-- `Conflict.resolvedAt` 标记解决时间；为空表示未解决
-- 重排确认时创建 `DecisionLog(actionType=REPLAN)`，记录冲突摘要、旧/新 Schedule 摘要、受影响 owner 数量与约束
-
-### 事务与重复确认保护
-
-- `replan-confirm` 单事务内：二次校验冲突仍未解决 → 旧 Schedule 仍有效 → 旧 Schedule 改 CANCELLED → 创建新 Schedule → 更新 Conflict.resolution/resolvedAt → 写 DecisionLog
-- 任一步失败整体回滚，不会出现"旧计划取消了但新计划没创建"的半状态
-- 重复确认同一冲突会被以 `CONFLICT_ALREADY_RESOLVED` 拒绝
-
-## S3 当前能力
-
-- `/tasks` 左侧任务列表（截止 / 优先级 / 状态 / 来源）、右侧任务详情（描述、来源与原文依据、子任务）
-- 「AI 拆解任务」生成拆解预览：子任务标题、预计耗时、顺序与依赖关系
-- 确认前可编辑：子任务标题、预计耗时、依赖关系（可调整或取消）
-- 「确认拆解」后事务写入 SubTask + SubTaskDependency + DecisionLog（DECOMPOSE）
-- 已拆解任务展示正式子任务，不支持重复拆解或覆盖（服务端 409）
-- 演示数据内置一个尚未拆解的任务（《数据结构》课程设计报告），便于直接演示
-
-### 拆解流程
-
-```
-Task → AI decompose → DecompositionResult（Zod 校验 + 依赖 DAG 校验）
-     → 用户人工编辑 → 服务端再次校验 → Prisma transaction 入库 → DecisionLog 留痕
-```
-
-### 子任务依赖约束
-
-- `dependsOn` 只能引用同一次拆解结果内的 `clientId`（禁止用数据库 ID 直接提交）
-- 禁止自依赖、禁止引用不存在的节点、禁止成环（复用 S1 的 `findDependencyCycle`）
-- 子任务数量 2~8，预计耗时 15~480 分钟，`sortOrder` 唯一
-- **最终判断在服务端执行**，前端提示只是辅助
-
-AI 仅提出建议，人工确认后才进入正式数据；`MockAIProvider` 仍只是开发期 Provider。
-
-## S2 当前能力
-
-- 粘贴校园通知 → AI 结构化提取（事件 / 任务 / 截止 / 优先级 / 预计耗时 / 原文依据）
-- 原文证据高亮：点击任务卡的「查看原文依据」在原文中精确高亮对应字符范围
-- 人工确认前可编辑任务字段（标题 / 截止 / 优先级 / 耗时 / 描述）
-- 确认入库：事务写入 Source + Task + DecisionLog，服务端复核 evidence
-- 重复提交防护：按钮禁用 + 相同原文服务端拒绝（409）
-- `/inbox` 页提供「加载演示通知」一键载入虚构演示样本
-
-## 验证命令
-
-```bash
-npm run db:verify   # S1 数据层关联验证（隔离临时库，不依赖 dev.db 演示状态）
-npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清理）
-npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
-npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
-npm run s5:verify   # S5 冲突检测与重排验证（CalendarEvent/检测/受影响集合/预览/确认事务/清理）
-npm run s6:verify   # S6 真实 Provider 验证（配置/请求组装/超时重试/错误码/quote 定位，离线）
-npm run s7:verify   # S7 决策解释时间线验证（聚合/角色映射/old→new/容错/契约/清理，隔离库）
-npm run demo:verify # 演示基线验证（两轮重置结果一致/空状态/结构/不污染，隔离临时库）
-```
-
-## Demo Reset
-
-一键把本地开发数据库恢复为稳定、可重复的演示初始状态：
-
-```bash
-npm install
-npx prisma migrate deploy
-npm run db:demo
-npm run dev
-```
-
-- `npm run db:demo` 流程：校验 DATABASE_URL → 删除 `prisma/dev.db` → `migrate deploy` → `seed` → demo fixture
-- **只允许重置项目本地 `prisma/dev.db`**；DATABASE_URL 指向其他任何数据库时拒绝执行并报 `DEMO_RESET_UNSAFE_DATABASE`
-- 演示基线：3 门固定课程（高等数学 周一 / 数据结构 周三 / 大学英语 周五）+ 2 个普通任务（图书馆归还资料 / 完成课程阅读）
-- 明确为空：Source / Schedule / CalendarEvent / Conflict / DecisionLog（含 SubTask）——决策历史由现场操作真实产生，不伪造
-- 可重复执行，每次结果一致；不依赖真实 LLM，不调用网络
-
-## Demo Notice
-
-Inbox 页「加载演示通知」按钮使用固定演示文本（[demo-notice.ts](src/lib/fixtures/demo-notice.ts)，Mock 规则可稳定提取 3 项任务），全文如下，也可手动复制粘贴：
+点击 Inbox 页「**加载演示通知**」按钮即可载入固定演示文本（[demo-notice.ts](src/lib/fixtures/demo-notice.ts)，Mock 规则可稳定提取 3 项任务），无需手动复制。全文：
 
 ```text
 【校学生科技创新协会】关于举办 2026 年校园数字创意挑战赛的通知
@@ -316,73 +124,142 @@ Inbox 页「加载演示通知」按钮使用固定演示文本（[demo-notice.t
 2026 年 10 月 21 日
 ```
 
-## Recommended Demo Flow
+## 7. Recommended Demo Flow（9 步）
 
-1. **Inbox**：加载/粘贴演示通知 → AI 提取 → 查看 Evidence（quote 高亮原文）→ 人工确认入库
-2. **Tasks**：对任务执行 AI 拆解 → 查看子任务与依赖 → 「查看决策解释」打开 DecisionDrawer（EXTRACT → DECOMPOSE）
-3. **Schedule**：生成计划 → 查看预览块 rationale → 人工确认写入
-4. **冲突演示**：添加占用计划时段的临时事件 → 红色冲突 → 生成重排预览 → 人工确认（旧 CANCELLED / 新 CONFIRMED）
-5. **DecisionDrawer**：从任务或计划块打开，查看 PLAN / REPLAN 的 RULE_ENGINE 依据与 old → new 对照
-6. **Complete**：逐个子任务标记完成 → 父任务自动完成 → 未来计划自动取消，时间线出现 HUMAN 阶段
+1. **Inbox** → 加载 Demo Notice
+2. **AI 解析** → 提取出 3 项任务
+3. 点击 **Evidence** → 原文中精确高亮 quote 依据
+4. **Confirm Tasks** → 人工确认入库（Source + Task + DecisionLog）
+5. **Tasks** → AI Decompose → 编辑/确认子任务与依赖 → Confirm
+6. **Schedule** → Generate 预览（虚线块 + rationale）→ Confirm 写入
+7. 添加临时 **CalendarEvent** → 页面红色高亮 **Conflict**
+8. **Replan** → 预览 old → new → Confirm；打开 **DecisionDrawer** 查看完整决策链
+9. **Complete** → 子任务逐个完成 → 父任务自动完成，未来计划取消，时间线出现 COMPLETE / HUMAN
 
-## AIProvider 架构
+Mock 模式可完整走通主流程；Real 模式用于展示真实模型的 extraction / decomposition。
 
-- `src/lib/ai/contract.ts`：Zod 契约 + evidence 精确校验（唯一校验入口）
-- `src/lib/ai/provider.ts`：AIProvider 接口（含 provider / model / prompt 版本元信息）
-- `src/lib/ai/mock-provider.ts`：**开发期 Mock**（确定性规则解析，模拟 500~1000ms 延迟；保守原则，识别不了就不提取）
-- `src/lib/ai/real-provider.ts`：**真实 Provider**（原生 fetch 调 OpenAI-compatible 接口，不引入厂商 SDK）
-- `src/lib/ai/config.ts`：环境变量读取与启动校验（`AI_CONFIG_INVALID`）
-- `src/lib/ai/prompts.ts`：提取 / 拆解 Prompt 模板与版本号
-- `src/lib/ai/index.ts`：`getAIProvider()` 工厂，经环境变量 `AI_PROVIDER=mock|real` 切换，不缓存、不回退
+## 8. Decision Explainability（DecisionDrawer）
 
-## 环境要求
+Inbox / Tasks / Schedule 三页共用的全局决策解释抽屉，阶段 → 角色映射：
 
-- Node.js >= 20.9（推荐 22+ LTS，本项目在 v24.22.0 验证）
-- npm >= 10（本项目在 11.19.1 验证）
-- Git >= 2.40（本项目在 2.56.0 验证）
+| 阶段 | 角色 |
+| --- | --- |
+| EXTRACT | AI |
+| DECOMPOSE | AI |
+| PLAN | RULE_ENGINE |
+| REPLAN | RULE_ENGINE |
+| COMPLETE | HUMAN |
 
-## 快速开始
+- Evidence、rationale、old → new 对照**全部来自已有系统记录**（DecisionLog / Schedule / Conflict），不重新生成
+- REPLAN 展示：触发冲突 → 固定占用方 → 原计划（CANCELLED，保留历史）→ 新计划（CONFIRMED）
+- `aiContext`（provider / model / promptVersion / durationMs）仅为「**AI 调用上下文**」，用于展示与调试，**不是不可篡改的审计证据**
+- 阶段缺失自动跳过：未拆解或未重排的任务，对应阶段不显示、接口不报错
 
-```bash
-# 安装依赖（postinstall 会自动生成 Prisma Client）
-npm install
+## 9. Prompt Pipeline
 
-# 创建/应用数据库迁移（开发环境）
-npm run db:migrate
+Prompt 模板集中管理于 [prompts.ts](src/lib/ai/prompts.ts)，当前版本（与源码一致）：
 
-# 写入演示种子数据（幂等，可重复运行）
-npm run db:seed
+- `EXTRACTION_PROMPT_VERSION = "1.0"`
+- `DECOMPOSITION_PROMPT_VERSION = "1.1"`（明确 15~480 分钟、15 分钟粒度、2~8 子任务）
 
-# 验证数据层关联
-npm run db:verify
+DecisionLog 只记录版本号，不记录完整 Prompt（模板在 Git 仓库中，可复现）。
 
-# 启动开发服务器（http://localhost:3000）
-npm run dev
+**Real model 输出不会被直接信任**：
 
-# 生产构建
-npm run build
+```
+模型 JSON
+  → candidate schema（宽松候选层）
+  → deterministic normalization（estimatedMinutes 按 15 分钟粒度向上取整并 clamp 到 15~480）
+  → formal Zod schema（正式契约）
+  → evidence / dependency validation（quote 原文定位；DAG 环检测）
+  → human confirmation（人工确认后才写入正式数据）
 ```
 
-## 数据库（S1）
+Evidence 策略：模型只返回 `quote`，由服务端在原文中定位 `start/end`——0 次命中报 `EVIDENCE_NOT_FOUND`，多次命中报 `EVIDENCE_AMBIGUOUS`，不信任模型自报的字符偏移。
 
-- ORM：Prisma 7（`prisma-client` 生成器 + `@prisma/adapter-better-sqlite3` 驱动适配器）
-- 数据库：SQLite，本地文件 `prisma/dev.db`（已被 .gitignore 忽略，不入库）
-- 配置：`prisma.config.ts`（schema 路径 / 迁移 / seed 命令 / 连接 URL）
-- 迁移文件：`prisma/migrations/`（纳入版本管理，新环境可直接重建）
+## 10. Scheduling Semantics
 
-新环境从零重建数据库：
+与源码（`src/lib/planning`、`src/lib/time.ts`）一致：
+
+- 时区 **Asia/Shanghai**（UTC+8，无夏令时），不引入大型日期库
+- 可安排区间 **08:00-22:00**，最小排期粒度 **30 分钟**
+- 区间语义 **[start, end)**：10:00-11:00 与 11:00-12:00 边界相接不算冲突
+- **Course = 硬约束**（按周重复），**CalendarEvent = 硬约束**（一次性固定占用）
+- **effective Schedule**（`status != CANCELLED`）= busy 占用
+- **DONE** owner 不再参与 planning / replanning
+- **CANCELLED** schedule 保留历史但不再占用、不参与冲突检测
+- 长任务拆块：单块 30~120 分钟；estimatedMinutes 非 30 整数倍按 `ceil(est/30)*30` 排期并在 rationale 说明
+- 依赖：后续子任务不得早于全部前置完成时间
+- 排期 / 重排均为「预览 → 人工确认 → 服务端全量复核 → 单事务写入」，任何失败整体回滚
+
+## 11. Verification
+
+以下命令均真实存在于 `package.json`：
 
 ```bash
-npm install          # 依赖 + 自动生成 Prisma Client
-npm run db:migrate   # 应用迁移，创建表结构
-npm run db:seed      # 写入幂等演示数据
-npm run db:verify    # 校验关联数据
+npm run db:demo      # 重置演示数据库（仅允许本地 prisma/dev.db，否则 DEMO_RESET_UNSAFE_DATABASE）
+npm run demo:verify  # 演示基线验证（两轮重置一致/空状态/结构，隔离临时库）
+npm run db:verify    # S1 数据层关联验证（隔离临时库）
+npm run s2:verify    # S2 提取链路验证（Mock/契约/确定性/入库清理）
+npm run s3:verify    # S3 拆解链路验证（契约/DAG/事务/清理）
+npm run s4:verify    # S4 排期验证（确定性引擎/约束/确认事务，隔离库）
+npm run s5:verify    # S5 冲突检测与重排验证（CalendarEvent/重排事务/清理）
+npm run s6:verify    # S6 真实 Provider 验证（配置/重试/错误码/quote 定位，离线打桩）
+npm run s6:smoke     # 可选真实冒烟（未配置 real 时直接 SKIPPED）
+npm run s7:verify    # S7 决策解释时间线 + 完成闭环验证（隔离库）
+npm run build        # 生产构建
+npm run lint         # ESLint
 ```
 
-## 技术栈
+verify 脚本尽可能使用临时 / 隔离数据库（`prisma/dev.db.<tag>`，结束后自动清理），避免污染真实演示 `dev.db`。
 
-- Next.js（App Router）+ TypeScript
-- Tailwind CSS
-- ESLint
-- Prisma 7 + SQLite
-- npm 包管理器
+## 12. Evolution History
+
+9 条线性 commit（`git log --oneline` 可查）：
+
+| 阶段 | Commit | 内容 |
+| --- | --- | --- |
+| S0 | `2eb2cc1` | 项目骨架（Next.js + TS + Tailwind 脚手架） |
+| S1 | `5ee80cf` | Prisma 数据模型与可复现 seed |
+| S2 | `18a1774` | Explainable Inbox Extraction（提取 + Evidence） |
+| S3 | `b7e985f` | Task Decomposition（拆解 + 依赖 DAG） |
+| S4 | `7df9abe` | Deterministic Planning（确定性排期） |
+| S5 | `e542e67` | Conflict-aware Replanning（冲突 + 重排） |
+| S6 | `f1c1f7d` | Real LLM Provider + Prompt Pipeline |
+| S7 | `4ce1c94` | Decision Timeline + Completion Lifecycle |
+| S9 | `1977298` | Reproducible Demo Reset（一键演示重置） |
+
+注：编号跳过 S8——S8 是远程备份 / 交付步骤（首次 push 到 GitHub），不产生代码变更，因此没有对应 commit，也未伪造。
+
+## 13. Project Structure
+
+```
+src/
+  app/          # 页面（/ /inbox /tasks /schedule）与 API 路由
+  components/   # 共用 AppShell、全局 DecisionDrawer 等 UI 组件
+  lib/
+    ai/         # AIProvider 接口、Mock/Real Provider、Prompt 模板、Zod 契约
+    planning/   # 确定性 PlanningEngine（纯函数）与排期契约
+    services/   # inbox / tasks / schedule / decision / completion 业务服务
+    decision/   # DecisionTimeline 展示契约
+    fixtures/   # 固定演示通知
+prisma/         # schema、migrations、seed、本地 dev.db（不入库）
+scripts/        # 各阶段 verify、demo 重置与基线验证（隔离临时库）
+```
+
+## 14. Security & Data Safety
+
+- `.env` 不提交 Git（`.gitignore` 覆盖），`.env.example` 仅含空值模板
+- API Key 仅服务端读取（无 `NEXT_PUBLIC_` 前缀），不返回浏览器、不写入 DecisionLog
+- 无 silent Real→Mock fallback：real 模式配置缺失即报 `AI_CONFIG_INVALID`
+- demo reset 仅允许项目本地 `prisma/dev.db`，其他路径一律 `DEMO_RESET_UNSAFE_DATABASE` 拒绝执行；不使用模糊 `*.db` 删除
+- verify 脚本使用隔离临时库并自动清理，不会对演示库做全表删除
+
+## 15. Known Boundaries（MVP Scope）
+
+当前为比赛 MVP，边界如实说明：
+
+- 单用户本地演示场景，无登录 / 权限系统
+- SQLite 本地文件库，非多用户并发设计
+- `aiContext` 是 AI 调用上下文，不是不可篡改的审计记录
+- Real Provider 当前聚焦 extraction / decomposition，不参与排期与重排
