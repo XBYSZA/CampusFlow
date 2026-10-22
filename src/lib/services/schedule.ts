@@ -58,6 +58,7 @@ export class ScheduleError extends Error {
       | "BLOCK_OUT_OF_RANGE"
       | "DEADLINE_EXCEEDED"
       | "COURSE_OVERLAP"
+      | "CALENDAR_EVENT_OVERLAP"
       | "SCHEDULE_OVERLAP"
       | "BLOCK_OVERLAP"
       | "DEPENDENCY_VIOLATION"
@@ -80,7 +81,7 @@ const MAX_BLOCK_MINUTES = 120;
 type ScheduleWithOwner = Prisma.ScheduleGetPayload<{
   include: {
     task: { select: { id: true; title: true } };
-    subTask: { select: { id: true; title: true } };
+    subTask: { select: { id: true; title: true; taskId: true } };
   };
 }>;
 
@@ -115,6 +116,8 @@ export interface PlanningContext {
   scheduledOwnerIds: Set<string>;
   busy: BusyInterval[];
   dependencyReadyAt: DependencyReady[];
+  /** 不可移动的临时固定事件，与 Course / Schedule 同等优先级 */
+  calendarEvents: Array<{ id: string; title: string; startAt: Date; endAt: Date; location: string | null }>;
 }
 
 function normalizePriority(value: string): "LOW" | "MEDIUM" | "HIGH" {
@@ -217,7 +220,7 @@ export function buildPlanningItems(
 
 /** 读取并规范化排期所需数据（预览与确认都从数据库重新读取） */
 export async function loadPlanningContext(): Promise<PlanningContext> {
-  const [tasks, courses, schedules] = await Promise.all([
+  const [tasks, courses, schedules, calendarEvents] = await Promise.all([
     prisma.task.findMany({
       orderBy: { createdAt: "asc" },
       include: {
@@ -233,9 +236,10 @@ export async function loadPlanningContext(): Promise<PlanningContext> {
       orderBy: { startAt: "asc" },
       include: {
         task: { select: { id: true, title: true } },
-        subTask: { select: { id: true, title: true } },
+        subTask: { select: { id: true, title: true, taskId: true } },
       },
     }),
+    prisma.calendarEvent.findMany({ orderBy: { startAt: "asc" } }),
   ]);
 
   const scheduledOwnerIds = new Set<string>();
@@ -255,6 +259,15 @@ export async function loadPlanningContext(): Promise<PlanningContext> {
       ownerId,
       readyAt: schedule.endAt,
       title: schedule.subTask?.title ?? schedule.task?.title,
+    });
+  }
+
+  // CalendarEvent 同样作为固定占用，进入排期引擎的 busy
+  for (const event of calendarEvents) {
+    busy.push({
+      startAt: event.startAt,
+      endAt: event.endAt,
+      label: event.title,
     });
   }
 
@@ -286,6 +299,13 @@ export async function loadPlanningContext(): Promise<PlanningContext> {
     scheduledOwnerIds,
     busy,
     dependencyReadyAt,
+    calendarEvents: calendarEvents.map((event) => ({
+      id: event.id,
+      title: event.title,
+      startAt: event.startAt,
+      endAt: event.endAt,
+      location: event.location,
+    })),
   };
 }
 
@@ -430,6 +450,7 @@ export async function getWeekSchedule(now: Date = new Date()): Promise<WeekSched
         id: schedule.id,
         ownerType: (schedule.subTaskId ? "SUBTASK" : "TASK") as "TASK" | "SUBTASK",
         ownerId: (schedule.subTaskId ?? schedule.taskId ?? "") as string,
+        taskId: (schedule.taskId ?? schedule.subTask?.taskId ?? null) as string | null,
         title: schedule.subTask?.title ?? schedule.task?.title ?? "未命名日程",
         startAt: schedule.startAt.toISOString(),
         endAt: schedule.endAt.toISOString(),
@@ -653,6 +674,23 @@ function validateBlock(
       throw new ScheduleError(
         "COURSE_OVERLAP",
         `「${owner.title}」的 ${formatDateTime(startAt)}-${formatDateTime(endAt)} 与课程「${course.title}」重叠`,
+      );
+    }
+  }
+
+  // CalendarEvent 与 Course 一样是不可移动的硬约束
+  for (const event of context.calendarEvents) {
+    if (
+      intervalsOverlap(
+        startMs,
+        endMs,
+        event.startAt.getTime(),
+        event.endAt.getTime(),
+      )
+    ) {
+      throw new ScheduleError(
+        "CALENDAR_EVENT_OVERLAP",
+        `「${owner.title}」的 ${formatDateTime(startAt)}-${formatDateTime(endAt)} 与固定事件「${event.title}」${formatDateTime(event.startAt)}-${formatDateTime(event.endAt)} 重叠`,
       );
     }
   }

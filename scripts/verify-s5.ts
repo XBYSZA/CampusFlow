@@ -8,7 +8,8 @@ import {
   confirmReplan,
   generateReplanPreview,
 } from "../src/lib/services/replan";
-import { shanghaiDate } from "../src/lib/time";
+import { confirmPlan, generatePlanPreview } from "../src/lib/services/schedule";
+import { intervalsOverlap, shanghaiDate } from "../src/lib/time";
 
 // ============================================================
 // S5 验证脚本：CalendarEvent / 冲突检测 / 受影响集合 / 重排预览 / 确认事务
@@ -494,6 +495,180 @@ async function main() {
     check("26. transaction 回滚测试跳过", false);
     check("27. transaction 回滚测试跳过", false);
   }
+
+  // ------------------------------------------------------------
+  // S7.1 回归：CalendarEvent 是不可移动硬约束
+  // 29 preview 避让 / 30 边界相接不算冲突 / 31-32 confirm 拒绝 / 33-34 replan 仍避让
+  // ------------------------------------------------------------
+  const previewTaskId = `${PREFIX}plan_task`;
+  const replanTaskId = `${PREFIX}replan_task`;
+  const replanSubId = `${PREFIX}replan_sub`;
+  const replanSchedId = `${PREFIX}replan_sched`;
+  const previewEventId = `${PREFIX}event_preview`;
+  const replanEventId = `${PREFIX}event_replan`;
+
+  await prisma.task.create({
+    data: {
+      id: previewTaskId,
+      title: "S7.1 预览避让验证",
+      deadline: shanghaiDate(2026, 10, 28, 18, 0),
+      priority: "MEDIUM",
+      status: "TODO",
+      estimatedMinutes: 30,
+    },
+  });
+  await prisma.calendarEvent.create({
+    data: {
+      id: previewEventId,
+      title: "S7.1 固定讲座",
+      startAt: shanghaiDate(2026, 10, 25, 10, 0),
+      endAt: shanghaiDate(2026, 10, 25, 11, 0),
+      eventType: "LECTURE",
+    },
+  });
+
+  const planPreview = await generatePlanPreview({ rangeDays: 7 }, NOW);
+  const allEvents = await prisma.calendarEvent.findMany();
+  const previewOverlap = planPreview.blocks.filter((block) =>
+    allEvents.some((event) =>
+      intervalsOverlap(
+        new Date(block.startAt).getTime(),
+        new Date(block.endAt).getTime(),
+        event.startAt.getTime(),
+        event.endAt.getTime(),
+      ),
+    ),
+  );
+  check(
+    "29. 普通 plan preview 避开全部 CalendarEvent",
+    previewOverlap.length === 0,
+    `${planPreview.blocks.length} blocks, overlap=${previewOverlap.length}`,
+  );
+
+  const touchingSchedules = [
+    {
+      id: `${PREFIX}touch_sched`,
+      ownerId: `${PREFIX}touch_owner`,
+      title: "边界相接验证",
+      startAt: shanghaiDate(2026, 10, 25, 9, 0),
+      endAt: shanghaiDate(2026, 10, 25, 10, 0),
+    },
+  ];
+  const touchingConflicts = detectConflicts({
+    schedules: touchingSchedules,
+    courses: [],
+    calendarEvents: [
+      {
+        id: previewEventId,
+        title: "S7.1 固定讲座",
+        startAt: shanghaiDate(2026, 10, 25, 10, 0),
+        endAt: shanghaiDate(2026, 10, 25, 11, 0),
+      },
+    ],
+  });
+  check(
+    "30. CalendarEvent 与候选 block 边界相接不算冲突",
+    touchingConflicts.length === 0 &&
+      !intervalsOverlap(
+        shanghaiDate(2026, 10, 25, 9, 0).getTime(),
+        shanghaiDate(2026, 10, 25, 10, 0).getTime(),
+        shanghaiDate(2026, 10, 25, 10, 0).getTime(),
+        shanghaiDate(2026, 10, 25, 11, 0).getTime(),
+      ),
+  );
+
+  await expectCode(
+    "31. confirmPlan 对 CalendarEvent 重叠 block 返回 CALENDAR_EVENT_OVERLAP",
+    () =>
+      confirmPlan(
+        {
+          rangeStart: shanghaiDate(2026, 10, 20, 0, 0).toISOString(),
+          rangeEnd: shanghaiDate(2026, 10, 27, 0, 0).toISOString(),
+          blocks: [
+            {
+              clientId: "verify_s5_plan_block",
+              ownerType: "TASK",
+              ownerId: previewTaskId,
+              title: "S7.1 预览避让验证",
+              startAt: shanghaiDate(2026, 10, 25, 10, 0).toISOString(),
+              endAt: shanghaiDate(2026, 10, 25, 10, 30).toISOString(),
+              rationale: "故意与固定事件重叠，验证服务端拒绝",
+            },
+          ],
+          unscheduled: [],
+        },
+        NOW,
+      ),
+    "CALENDAR_EVENT_OVERLAP",
+  );
+
+  const leakedSchedules = await prisma.schedule.count({ where: { taskId: previewTaskId } });
+  check(
+    "32. confirm 失败后数据库没有新增 Schedule",
+    leakedSchedules === 0,
+    `count=${leakedSchedules}`,
+  );
+
+  await prisma.task.create({
+    data: {
+      id: replanTaskId,
+      title: "S7.1 重排避让验证",
+      deadline: shanghaiDate(2026, 10, 28, 18, 0),
+      priority: "HIGH",
+      status: "TODO",
+      estimatedMinutes: 60,
+      subTasks: {
+        create: [{ id: replanSubId, title: "准备演示材料", estimatedMinutes: 60, status: "TODO", sortOrder: 1 }],
+      },
+    },
+  });
+  await prisma.schedule.create({
+    data: {
+      id: replanSchedId,
+      subTaskId: replanSubId,
+      startAt: shanghaiDate(2026, 10, 25, 10, 0),
+      endAt: shanghaiDate(2026, 10, 25, 11, 0),
+      status: "CONFIRMED",
+      rationale: "与固定事件重叠，触发重排",
+    },
+  });
+  await prisma.calendarEvent.create({
+    data: {
+      id: replanEventId,
+      title: "S7.1 临时评审",
+      startAt: shanghaiDate(2026, 10, 25, 10, 30),
+      endAt: shanghaiDate(2026, 10, 25, 11, 30),
+      eventType: "MEETING",
+    },
+  });
+
+  const detected = await runConflictDetection(replanEventId);
+  check(
+    "33. 添加 CalendarEvent 后已有正式 Schedule 仍能检测冲突",
+    detected.length > 0,
+    `conflicts=${detected.length}`,
+  );
+
+  const replanPreview = await generateReplanPreview(
+    detected.map((c) => c.id),
+    NOW,
+  );
+  const eventsAfterReplan = await prisma.calendarEvent.findMany();
+  const replanOverlap = replanPreview.newBlocks.filter((block) =>
+    eventsAfterReplan.some((event) =>
+      intervalsOverlap(
+        new Date(block.startAt).getTime(),
+        new Date(block.endAt).getTime(),
+        event.startAt.getTime(),
+        event.endAt.getTime(),
+      ),
+    ),
+  );
+  check(
+    "34. Replan 预览仍避开 CalendarEvent",
+    replanPreview.newBlocks.length > 0 && replanOverlap.length === 0,
+    `blocks=${replanPreview.newBlocks.length}, overlap=${replanOverlap.length}`,
+  );
 
   // ------------------------------------------------------------
   // 28. 清理不污染正式 seed

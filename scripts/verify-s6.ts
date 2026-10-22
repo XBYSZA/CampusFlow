@@ -12,12 +12,13 @@
 // ============================================================
 
 import { MockAIProvider } from "../src/lib/ai/mock-provider";
-import { RealAIProvider } from "../src/lib/ai/real-provider";
+import { RealAIProvider, normalizeEstimatedMinutes } from "../src/lib/ai/real-provider";
 import { AIConfigError, loadRealLLMConfig, resolveAIProviderKind } from "../src/lib/ai/config";
 import { getAIProvider } from "../src/lib/ai";
 import {
   DECOMPOSITION_PROMPT_VERSION,
   EXTRACTION_PROMPT_VERSION,
+  buildDecompositionMessages,
   buildDecompositionPrompt,
   buildExtractionPrompt,
 } from "../src/lib/ai/prompts";
@@ -355,9 +356,106 @@ async function main(): Promise<void> {
     validateDecomposition(cycle).some((p) => p.includes("依赖关系存在环")),
   );
 
+  // ---------- 6b. 模型耗时归一化（S7.1） ----------
+  check("归一化 5 → 15", normalizeEstimatedMinutes(5) === 15, `${normalizeEstimatedMinutes(5)}`);
+  check("归一化 10 → 15", normalizeEstimatedMinutes(10) === 15, `${normalizeEstimatedMinutes(10)}`);
+  check("归一化 17 → 30", normalizeEstimatedMinutes(17) === 30, `${normalizeEstimatedMinutes(17)}`);
+  check("归一化 31 → 45", normalizeEstimatedMinutes(31) === 45, `${normalizeEstimatedMinutes(31)}`);
+  check("归一化 470 → 480", normalizeEstimatedMinutes(470) === 480, `${normalizeEstimatedMinutes(470)}`);
+  check("归一化 600 → 480", normalizeEstimatedMinutes(600) === 480, `${normalizeEstimatedMinutes(600)}`);
+  check("归一化 15 → 15（边界不抬高）", normalizeEstimatedMinutes(15) === 15);
+  check("归一化 480 → 480（上界不溢出）", normalizeEstimatedMinutes(480) === 480);
+
+  const tinyMinutes = structuredClone(DECOMPOSITION_JSON);
+  tinyMinutes.subtasks[0].estimatedMinutes = 5;
+  tinyMinutes.subtasks[1].estimatedMinutes = 10;
+  installFetch(() => chatResponse(JSON.stringify(tinyMinutes)));
+  const normalizedResult = await provider.decomposeTask({
+    taskId: "verify_s6_task",
+    title: "报名训练营",
+    estimatedMinutes: 120,
+  });
+  check(
+    "模型返回 5 / 10 分钟 → 正式结果为 15",
+    normalizedResult.subtasks[0].estimatedMinutes === 15 &&
+      normalizedResult.subtasks[1].estimatedMinutes === 15,
+    normalizedResult.subtasks.map((s) => s.estimatedMinutes).join(","),
+  );
+  check(
+    "归一化结果仍通过正式 Decomposition schema",
+    decompositionResultSchema.safeParse(normalizedResult).success,
+  );
+  check(
+    "归一化结果仍通过依赖校验",
+    validateDecomposition(normalizedResult).length === 0,
+  );
+
+  const overMaxMinutes = structuredClone(DECOMPOSITION_JSON);
+  overMaxMinutes.subtasks[0].estimatedMinutes = 600;
+  overMaxMinutes.subtasks[1].estimatedMinutes = 31;
+  installFetch(() => chatResponse(JSON.stringify(overMaxMinutes)));
+  const clampedResult = await provider.decomposeTask({
+    taskId: "verify_s6_task",
+    title: "报名训练营",
+    estimatedMinutes: 120,
+  });
+  check(
+    "模型返回 600 / 31 分钟 → 480 / 45",
+    clampedResult.subtasks[0].estimatedMinutes === 480 &&
+      clampedResult.subtasks[1].estimatedMinutes === 45,
+    clampedResult.subtasks.map((s) => s.estimatedMinutes).join(","),
+  );
+
+  // 结构错误仍必须拒绝，不能被归一化掩盖
+  const selfDependencyJson = structuredClone(DECOMPOSITION_JSON);
+  selfDependencyJson.subtasks[0].dependsOn = ["step-1"];
+  selfDependencyJson.subtasks[0].estimatedMinutes = 5;
+  installFetch(() => chatResponse(JSON.stringify(selfDependencyJson)));
+  const selfParsed = await provider.decomposeTask({
+    taskId: "verify_s6_task",
+    title: "报名训练营",
+    estimatedMinutes: 120,
+  });
+  check(
+    "归一化后自依赖仍被服务端拒绝",
+    validateDecomposition(selfParsed).some((p) => p.includes("不能依赖自己")),
+  );
+
+  const cycleJson = structuredClone(DECOMPOSITION_JSON);
+  cycleJson.subtasks[0].dependsOn = ["step-2"];
+  cycleJson.subtasks[0].estimatedMinutes = 5;
+  installFetch(() => chatResponse(JSON.stringify(cycleJson)));
+  const cycleParsed = await provider.decomposeTask({
+    taskId: "verify_s6_task",
+    title: "报名训练营",
+    estimatedMinutes: 120,
+  });
+  check(
+    "归一化后环依赖仍被服务端拒绝",
+    validateDecomposition(cycleParsed).some((p) => p.includes("依赖关系存在环")),
+  );
+
+  const invalidMinutes = structuredClone(DECOMPOSITION_JSON);
+  (invalidMinutes.subtasks[0] as { estimatedMinutes: unknown }).estimatedMinutes = "abc";
+  installFetch(() => chatResponse(JSON.stringify(invalidMinutes)));
+  await expectCode(
+    "estimatedMinutes 非数字 → 仍被 candidate 拒绝",
+    () => provider.decomposeTask({ taskId: "verify_s6_task", title: "报名训练营", estimatedMinutes: 120 }),
+    "AI_SCHEMA_INVALID",
+  );
+
+  const zeroMinutes = structuredClone(DECOMPOSITION_JSON);
+  zeroMinutes.subtasks[0].estimatedMinutes = 0;
+  installFetch(() => chatResponse(JSON.stringify(zeroMinutes)));
+  await expectCode(
+    "estimatedMinutes=0 → 仍被 candidate 拒绝",
+    () => provider.decomposeTask({ taskId: "verify_s6_task", title: "报名训练营", estimatedMinutes: 120 }),
+    "AI_SCHEMA_INVALID",
+  );
+
   // ---------- 7. Prompt 版本与模板 ----------
   check("提取 Prompt 版本存在", EXTRACTION_PROMPT_VERSION === "1.0");
-  check("拆解 Prompt 版本存在", DECOMPOSITION_PROMPT_VERSION === "1.0");
+  check("拆解 Prompt 版本提升至 1.1", DECOMPOSITION_PROMPT_VERSION === "1.1", DECOMPOSITION_PROMPT_VERSION);
   const extractionPrompt = buildExtractionPrompt({ rawText: RAW_TEXT, sourceTitle: "通知" });
   check("提取 Prompt 包含原文与来源标题", extractionPrompt.includes(RAW_TEXT) && extractionPrompt.includes("通知"));
   const decompositionPrompt = buildDecompositionPrompt({
@@ -366,6 +464,26 @@ async function main(): Promise<void> {
     estimatedMinutes: 120,
   });
   check("拆解 Prompt 包含任务标题与耗时", decompositionPrompt.includes("报名训练营") && decompositionPrompt.includes("120"));
+
+  const decompositionSystemPrompt = buildDecompositionMessages({
+    taskId: "verify_s6_task",
+    title: "报名训练营",
+    estimatedMinutes: 120,
+  })[0].content;
+  check(
+    "拆解 Prompt v1.1 明确 >=15 且 <=480",
+    decompositionSystemPrompt.includes(">= 15") && decompositionSystemPrompt.includes("<= 480"),
+  );
+  check(
+    "拆解 Prompt v1.1 明确 15 分钟粒度",
+    decompositionSystemPrompt.includes("15 分钟粒度") &&
+      decompositionSystemPrompt.includes("15 / 30 / 45 / 60"),
+  );
+  check(
+    "拆解 Prompt v1.1 明确 2~8 个子任务与粒度匹配",
+    decompositionSystemPrompt.includes("2~8") &&
+      decompositionSystemPrompt.includes("30 分钟的简单任务不应拆成很多个 5 分钟步骤"),
+  );
 
   // ---------- 8. aiMeta 契约 ----------
   check(

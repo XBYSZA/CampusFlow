@@ -27,6 +27,7 @@ export async function POST(req: Request) {
               error.code === "BLOCK_OUT_OF_RANGE" ||
               error.code === "DEADLINE_EXCEEDED" ||
               error.code === "COURSE_OVERLAP" ||
+              error.code === "CALENDAR_EVENT_OVERLAP" ||
               error.code === "SCHEDULE_OVERLAP" ||
               error.code === "BLOCK_OVERLAP" ||
               error.code === "DEPENDENCY_VIOLATION" ||

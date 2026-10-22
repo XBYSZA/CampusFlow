@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AIMeta } from "@/lib/ai/contract";
+import DecisionDrawer from "@/components/decision-drawer";
 
 // ============================================================
 // Tasks 任务板 + AI 拆解（S3 + S6）
@@ -91,6 +92,11 @@ export default function TasksPage() {
   const [aiMeta, setAiMeta] = useState<AIMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // S7：决策解释抽屉
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  // S7.2：任务完成闭环
+  const [completingTask, setCompletingTask] = useState(false);
+  const [completingSubTaskId, setCompletingSubTaskId] = useState<string | null>(null);
 
   const loadDetail = useCallback(async (id: string) => {
     setPhase("loadingDetail");
@@ -154,7 +160,67 @@ export default function TasksPage() {
     if (id === selectedId) return;
     setSelectedId(id);
     setSuccess(null);
+    setDrawerOpen(false);
     void loadDetail(id);
+  }
+
+  /** 完成操作后刷新左侧列表的状态标签 */
+  async function refreshTaskList() {
+    try {
+      const res = await fetch("/api/tasks");
+      const data = await res.json();
+      if (res.ok) setTasks(data.tasks as TaskListItem[]);
+    } catch {
+      // 列表刷新失败不影响完成结果本身
+    }
+  }
+
+  async function handleCompleteTask() {
+    if (!selectedId || completingTask) return;
+    setCompletingTask(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`/api/tasks/${selectedId}/complete`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "标记完成失败");
+      const message = data.alreadyCompleted
+        ? "该任务已经是已完成状态。"
+        : `任务「${data.title}」已完成${
+            data.cancelledScheduleCount > 0
+              ? `，并取消 ${data.cancelledScheduleCount} 个未来计划`
+              : ""
+          }。`;
+      await loadDetail(selectedId);
+      await refreshTaskList();
+      setSuccess(message);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setCompletingTask(false);
+    }
+  }
+
+  async function handleCompleteSubTask(subTaskId: string) {
+    if (!selectedId || completingSubTaskId) return;
+    setCompletingSubTaskId(subTaskId);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`/api/subtasks/${subTaskId}/complete`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "完成执行步骤失败");
+      const parts = [data.alreadyCompleted ? "该执行步骤已经是已完成状态" : `执行步骤「${data.title}」已完成`];
+      if (data.parentAutoCompleted) parts.push("所有执行步骤均已完成，主任务同步完成");
+      if (data.cancelledScheduleCount > 0) parts.push(`已取消 ${data.cancelledScheduleCount} 个未来计划`);
+      await loadDetail(selectedId);
+      await refreshTaskList();
+      setSuccess(`${parts.join("；")}。`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setCompletingSubTaskId(null);
+    }
   }
 
   async function runDecompose() {
@@ -308,7 +374,11 @@ export default function TasksPage() {
                 <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
                   <span className="truncate">{task.sourceTitle ?? "手动创建"}</span>
                   <span>
-                    {task.subtaskCount > 0 ? `已拆解 ${task.subtaskCount} 项` : "待拆解"}
+                    {task.status === "DONE"
+                      ? "已完成"
+                      : task.subtaskCount > 0
+                        ? `已拆解 ${task.subtaskCount} 项`
+                        : "待拆解"}
                   </span>
                 </div>
               </button>
@@ -340,14 +410,39 @@ export default function TasksPage() {
                       {detail.sourceTitle ?? "手动创建"} · {formatDeadline(detail.deadline)} · 预计{" "}
                       {detail.estimatedMinutes ?? "未设置"} 分钟
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => setDrawerOpen(true)}
+                      className="mt-2 rounded-md border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:border-slate-400 hover:bg-slate-50"
+                    >
+                      查看决策解释
+                    </button>
                   </div>
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
-                      PRIORITY_BADGE[detail.priority] ?? PRIORITY_BADGE.MEDIUM
-                    }`}
-                  >
-                    {PRIORITY_LABEL[detail.priority] ?? detail.priority}
-                  </span>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-xs ${
+                        PRIORITY_BADGE[detail.priority] ?? PRIORITY_BADGE.MEDIUM
+                      }`}
+                    >
+                      {PRIORITY_LABEL[detail.priority] ?? detail.priority}
+                    </span>
+                    {detail.status === "DONE" ? (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                        已完成
+                      </span>
+                    ) : detail.subTasks.length > 0 ? (
+                      <span className="text-[11px] text-slate-400">完成全部执行步骤后自动完成</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleCompleteTask}
+                        disabled={completingTask || busy || phase !== "detailReady"}
+                        className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {completingTask ? "处理中…" : "标记完成"}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {detail.description && (
@@ -401,9 +496,25 @@ export default function TasksPage() {
                             <span className="mr-1 text-slate-400">{orderLabel(index)}</span>
                             {st.title}
                           </span>
-                          <span className="shrink-0 text-xs text-slate-500">
-                            {st.estimatedMinutes ?? "—"} 分钟
-                          </span>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <span className="text-xs text-slate-500">
+                              {st.estimatedMinutes ?? "—"} 分钟
+                            </span>
+                            {st.status === "DONE" ? (
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-700">
+                                已完成
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleCompleteSubTask(st.id)}
+                                disabled={completingSubTaskId !== null}
+                                className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {completingSubTaskId === st.id ? "处理中…" : "完成"}
+                              </button>
+                            )}
+                          </div>
                         </div>
                         {st.dependsOn.length > 0 && (
                           <p className="mt-1 text-[11px] text-slate-400">
@@ -558,6 +669,11 @@ export default function TasksPage() {
           )}
         </section>
       </div>
+
+      <DecisionDrawer
+        taskId={drawerOpen && selectedId ? selectedId : null}
+        onClose={() => setDrawerOpen(false)}
+      />
     </main>
   );
 }

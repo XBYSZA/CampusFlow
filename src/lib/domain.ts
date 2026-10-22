@@ -6,7 +6,14 @@ export const PRIORITIES = ["LOW", "MEDIUM", "HIGH"] as const;
 export const TASK_STATUSES = ["TODO", "IN_PROGRESS", "DONE"] as const;
 export const SCHEDULE_STATUSES = ["PROPOSED", "CONFIRMED", "MOVED", "CANCELLED"] as const;
 export const CONFLICT_TYPES = ["OVERLAP", "DEADLINE_RISK"] as const;
-export const DECISION_ACTIONS = ["EXTRACT", "DECOMPOSE", "PLAN", "RESOLVE_CONFLICT", "REPLAN"] as const;
+export const DECISION_ACTIONS = [
+  "EXTRACT",
+  "DECOMPOSE",
+  "PLAN",
+  "RESOLVE_CONFLICT",
+  "REPLAN",
+  "COMPLETE",
+] as const;
 export const CALENDAR_EVENT_TYPES = ["LECTURE", "MEETING", "CLUB", "OTHER"] as const;
 
 export type SourceType = (typeof SOURCE_TYPES)[number];

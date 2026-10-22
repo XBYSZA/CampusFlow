@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import DecisionDrawer from "@/components/decision-drawer";
 import { DEMO_NOTICE } from "@/lib/fixtures/demo-notice";
 import type { AIMeta, Evidence } from "@/lib/ai/contract";
 
@@ -26,6 +27,8 @@ interface EditableTask {
 interface ConfirmResult {
   sourceId: string;
   taskCount: number;
+  /** 与提交顺序一致的任务 ID，用于打开决策解释抽屉（S7） */
+  taskIds: string[];
 }
 
 const PRIORITY_OPTIONS = [
@@ -79,6 +82,8 @@ export default function InboxPage() {
   const [showEditor, setShowEditor] = useState(true);
   // S6：本次提取使用的 Provider 元信息（仅用于展示与决策留痕）
   const [aiMeta, setAiMeta] = useState<AIMeta | null>(null);
+  // S7：决策解释抽屉当前打开的任务 ID（仅入库成功后可用）
+  const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null);
   // 初始为空串保证预渲染确定性；在首次解析（事件处理器）中惰性生成一次性提交 ID
   const submissionIdRef = useRef<string>("");
   const highlightRefs = useRef(new Map<string, HTMLElement>());
@@ -119,6 +124,7 @@ export default function InboxPage() {
     setActiveEvidence(null);
     setShowEditor(true);
     setAiMeta(null);
+    setDrawerTaskId(null);
     submissionIdRef.current = crypto.randomUUID();
   }
 
@@ -220,7 +226,11 @@ export default function InboxPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "入库失败");
-      setConfirmResult({ sourceId: data.sourceId, taskCount: data.taskCount });
+      setConfirmResult({
+        sourceId: data.sourceId,
+        taskCount: data.taskCount,
+        taskIds: Array.isArray(data.taskIds) ? (data.taskIds as string[]) : [],
+      });
       setPhase("confirmed");
     } catch (e) {
       setError((e as Error).message);
@@ -464,6 +474,16 @@ export default function InboxPage() {
                         </button>
                       ))}
                     </div>
+
+                    {phase === "confirmed" && confirmResult?.taskIds[ti] && (
+                      <button
+                        type="button"
+                        onClick={() => setDrawerTaskId(confirmResult.taskIds[ti])}
+                        className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                      >
+                        查看决策依据
+                      </button>
+                    )}
                   </div>
                 ))}
 
@@ -483,6 +503,8 @@ export default function InboxPage() {
           </div>
         </section>
       </div>
+
+      <DecisionDrawer taskId={drawerTaskId} onClose={() => setDrawerTaskId(null)} />
     </main>
   );
 }

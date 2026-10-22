@@ -4,7 +4,42 @@
 
 ## 当前阶段
 
-S6 · 真实 LLM Provider 接入
+S7 · 全局决策解释抽屉 + 产品演示打磨
+
+## S7 当前能力
+
+- 全局「决策解释抽屉」：Inbox / Tasks / Schedule 三个页面共用同一条决策解释链，不设独立 /explain 页面
+- 统一聚合 API：`GET /api/decisions/task/[taskId]`，把一个任务的 Source / Evidence / DecisionLog / SubTask / Schedule / Conflict 聚合为一条 `DecisionTimeline`
+- 阶段缺失自动跳过：任务未拆解或未发生过重排时，对应阶段不显示，接口不报错
+- AI 调用上下文（provider / model / promptVersion / 耗时）仅作展示与调试，**不是审计证据**
+- 全局统一页面壳（左侧导航：智能收件箱 / 任务板 / 智能日程），首页为三个入口卡片
+
+### 三种角色一眼可辨
+
+| 角色 | 负责 | 对应阶段 |
+| --- | --- | --- |
+| AI | 信息理解、任务拆解 | EXTRACT / DECOMPOSE |
+| 规则引擎 | 时间排期、冲突检测、重排 | PLAN / REPLAN |
+| 人工 | 确认提取、拆解、计划、重排 | 每个正式结果写入前 |
+
+抽屉中每个阶段都带角色徽标与颜色区分，评委可以直接看出「不是所有事情都扔给 LLM」。
+
+### DecisionLog → DecisionTimeline
+
+S2-S6 各阶段写入的 `DecisionLog`（EXTRACT / DECOMPOSE / PLAN / REPLAN）是结构化留痕；S7 在服务端把它们聚合成统一的 `DecisionTimeline` 展示契约（Zod 校验）：
+
+- EXTRACT：识别出的任务字段 + evidence quote + 原文上下文 + AI 调用上下文
+- DECOMPOSE：①②③ 子任务顺序、预计耗时与依赖关系（纯文本展示，不引入 React Flow）
+- PLAN：排期策略 + 每个计划块的时间段与 rationale（取自 DecisionLog / Schedule，不重新生成）
+- REPLAN：触发冲突 → 固定占用方 → 原计划（已取消，保留历史）→ 新计划（已确认）的 old → new 对照
+
+### 为什么不让 LLM 生成排期解释
+
+排期解释必须经得起复核：时间段、课程占用、依赖就绪时间都是数据库中的事实。如果让 LLM 临场编理由，可能出现与真实约束不一致的「合理化幻觉」。因此 PLAN / REPLAN 阶段的所有解释均直接取自 `DecisionLog.evidence` 与 `Schedule.rationale`——这些文字在排期发生时由确定性规则引擎根据真实约束生成，S7 只做展示，不做再创作。
+
+### S7 验证
+
+`npm run s7:verify` 在独立临时 SQLite 库上运行 17 项检查：来源聚合、evidence quote、四类阶段的角色映射、CANCELLED / CONFIRMED 历史区分、冲突 old → new 映射、无来源 / 无日志 / 阶段缺失容错、aiContext 非审计证据、契约校验与精确清理，全程不触碰开发数据库。
 
 ## S4 当前能力
 
@@ -237,6 +272,7 @@ npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/�
 npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
 npm run s5:verify   # S5 冲突检测与重排验证（CalendarEvent/检测/受影响集合/预览/确认事务/清理）
 npm run s6:verify   # S6 真实 Provider 验证（配置/请求组装/超时重试/错误码/quote 定位，离线）
+npm run s7:verify   # S7 决策解释时间线验证（聚合/角色映射/old→new/容错/契约/清理，隔离库）
 ```
 
 ## AIProvider 架构

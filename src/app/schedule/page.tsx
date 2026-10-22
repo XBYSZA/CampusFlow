@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import DecisionDrawer from "@/components/decision-drawer";
 import type {
   PlanBlock,
   PlanPreview,
@@ -33,6 +34,8 @@ interface SelectedBlock {
   endAt: string;
   detail?: string | null;
   extra?: string | null;
+  /** 正式计划块归属的任务 ID，用于打开决策解释抽屉（S7） */
+  taskId?: string | null;
 }
 
 interface ApiError {
@@ -114,6 +117,9 @@ export default function SchedulePage() {
   const [replan, setReplan] = useState<ReplanPreview | null>(null);
   const [replanLoading, setReplanLoading] = useState(false);
   const [replanConfirming, setReplanConfirming] = useState(false);
+
+  // S7：决策解释抽屉当前打开的任务 ID
+  const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null);
 
   const refreshWeek = useCallback(async () => {
     try {
@@ -254,11 +260,17 @@ export default function SchedulePage() {
       setShowEventForm(false);
       setEventTitle("");
       setEventLocation("");
+      // 固定日程已变化：旧 preview 可能包含与新增事件重叠的块，立即作废
+      const hadPreview = preview !== null;
+      setPreview(null);
+      setSelected(null);
       const n = data.newConflicts ?? 0;
       setNotice(
-        n > 0
-          ? `已创建「${data.event?.title}」，发现 ${n} 个计划冲突。`
-          : `已创建「${data.event?.title}」，未发现冲突。`,
+        hadPreview
+          ? `已创建「${data.event?.title}」，固定日程已变化，请重新生成计划。`
+          : n > 0
+            ? `已创建「${data.event?.title}」，发现 ${n} 个计划冲突。`
+            : `已创建「${data.event?.title}」，未发现冲突。`,
       );
       await refreshWeek();
     } catch (err) {
@@ -654,6 +666,15 @@ export default function SchedulePage() {
               {selected.detail}
             </p>
           )}
+          {selected.kind === "SCHEDULE" && selected.taskId && (
+            <button
+              type="button"
+              onClick={() => setDrawerTaskId(selected.taskId ?? null)}
+              className="mt-3 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+            >
+              为什么安排在这里？
+            </button>
+          )}
         </section>
       )}
 
@@ -751,6 +772,8 @@ export default function SchedulePage() {
       )}
 
       <UnscheduledPanel preview={preview} />
+
+      <DecisionDrawer taskId={drawerTaskId} onClose={() => setDrawerTaskId(null)} />
     </main>
   );
 }
@@ -851,6 +874,7 @@ function DayColumn({
                 extra: inConflict
                   ? "存在冲突"
                   : SCHEDULE_STATUS_LABELS[schedule.status] ?? schedule.status,
+                taskId: schedule.taskId,
               })
             }
             className={`absolute left-1 right-1 overflow-hidden rounded-md px-1.5 py-1 text-left text-[11px] leading-tight transition ${

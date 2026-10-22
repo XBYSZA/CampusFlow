@@ -8,7 +8,7 @@
 import type { DecomposeTaskInput, ExtractTasksInput } from "./provider";
 
 export const EXTRACTION_PROMPT_VERSION = "1.0";
-export const DECOMPOSITION_PROMPT_VERSION = "1.0";
+export const DECOMPOSITION_PROMPT_VERSION = "1.1";
 
 export interface ChatMessage {
   role: "system" | "user";
@@ -78,9 +78,10 @@ const DECOMPOSITION_SYSTEM_PROMPT = `你是 CampusFlow 的任务拆解助手，�
 4. sortOrder 从 0 开始连续递增且不重复，与执行顺序一致。
 5. dependsOn 只能引用同一批结果里出现过的 clientId；第一个子任务用空数组；禁止依赖自己。
 6. 禁止输出任何数据库 ID、任务 ID 或真实系统标识。
-7. estimatedMinutes 必须是 15~480 的整数，各子任务合计尽量接近主任务预计耗时。
-8. 依赖关系只是建议，服务端会做最终校验；但不要故意构造环。
-9. 不要安排具体日期时间，不要生成日程。
+7. estimatedMinutes 必须是 15~480 的整数，优先使用 15 分钟粒度（15 / 30 / 45 / 60 / 75 / 90 / 105 / 120 ...），每个子任务 >= 15，<= 480。
+8. 子任务的 estimatedMinutes 合计应与父任务预计耗时处于合理量级；一个 30 分钟的简单任务不应拆成很多个 5 分钟步骤。
+9. 依赖关系只是建议，服务端会做最终校验；但不要故意构造环。
+10. 不要安排具体日期时间，不要生成日程。
 
 输出 JSON 结构：
 {

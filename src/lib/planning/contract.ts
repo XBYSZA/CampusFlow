@@ -124,6 +124,8 @@ export interface WeekScheduleBlock {
   id: string;
   ownerType: OwnerType;
   ownerId: string;
+  /** 归属任务 ID（SubTask 归属其父 Task），供决策解释抽屉聚合（S7） */
+  taskId: string | null;
   title: string;
   startAt: string;
   endAt: string;

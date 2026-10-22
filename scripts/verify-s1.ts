@@ -118,9 +118,14 @@ async function main() {
   }
   check("DecisionLog.evidence 引文可在 Source.rawText 中找到", evidenceTraceable);
 
-  // 5. Conflict 表可通过模型表达（当前无数据，验证连接可查询即可）
+  // 5. Conflict 表可通过模型表达：只验证连接与结构可查询，
+  //    不断言为空——人工演示可能留下真实的冲突 / 重排历史，不应被测试当作异常。
   const conflicts = await prisma.conflict.findMany();
-  check("Conflict 表可查询（当前无种子数据）", conflicts.length === 0);
+  check(
+    "Conflict 表可查询（不依赖空表断言）",
+    Array.isArray(conflicts) && conflicts.every((c) => typeof c.id === "string"),
+    `count=${conflicts.length}`,
+  );
 
   // 汇总
   console.log("\nRelation chain:");

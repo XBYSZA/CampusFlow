@@ -68,6 +68,39 @@ const extractionCandidateSchema = z.object({
   tasks: z.array(candidateTaskSchema).max(20),
 });
 
+// ---------- 拆解 candidate ----------
+// 与提取不同：拆解没有中间定位 step，因此 candidate schema 接受「宽泛但仍合理」的分钟数
+// （任何正整数），再由确定性归一化函数规整到 15-480。非数字 / <=0 仍被拒绝。
+const candidateSubTaskSchema = z.object({
+  clientId: z.string().min(1).max(40),
+  title: z.string().min(1).max(100),
+  description: z.string().max(500).nullish(),
+  estimatedMinutes: z.coerce.number().int().positive("estimatedMinutes 必须是正整数"),
+  sortOrder: z.coerce.number().int().min(0).max(99),
+  dependsOn: z.array(z.string()).default([]),
+});
+
+const decompositionCandidateSchema = z.object({
+  taskSummary: z.string().min(1).max(500),
+  subtasks: z.array(candidateSubTaskSchema).min(2).max(8),
+});
+
+/**
+ * 拆解 estimatedMinutes 确定性归一化：
+ * - 1~14 → 15
+ * - 15~480 → ceil(value/15)*15（向上取整到 15 分钟粒度）
+ * - >480 → 480
+ *
+ * 非正整数 / 非有限数由 candidate schema 拒绝，不在这里猜。
+ */
+export function normalizeEstimatedMinutes(value: number): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return 15; // fallback：不应到达
+  }
+  const rounded = Math.ceil(value / 15) * 15;
+  return Math.min(ESTIMATED_MINUTES_MAX, Math.max(ESTIMATED_MINUTES_MIN, rounded));
+}
+
 const chatCompletionSchema = z.object({
   choices: z
     .array(
@@ -129,8 +162,11 @@ export function resolveEvidenceQuote(rawText: string, quote: string): Evidence {
 }
 
 /**
- * 拆解 candidate 的最小归一化：模型常把可选字段写成 null。
- * 只做 null → 缺省 / 空数组的等价转换，不做任何猜测性修补。
+ * 拆解 candidate 的最小归一化：
+ * - null → 缺省 / 空数组
+ * - estimatedMinutes → 确定性规整到 15~480 的 15 分钟粒度（RealAIProvider 专用适配层）
+ *
+ * 不做 title / dependsOn 等结构修补——结构错误直接交给正式契约拒绝。
  */
 function normalizeDecompositionCandidate(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
@@ -143,6 +179,14 @@ function normalizeDecompositionCandidate(value: unknown): unknown {
       const sub = { ...(item as Record<string, unknown>) };
       if (sub.description === null) delete sub.description;
       if (sub.dependsOn === null) sub.dependsOn = [];
+      if (typeof sub.estimatedMinutes === "number") {
+        sub.estimatedMinutes = normalizeEstimatedMinutes(sub.estimatedMinutes);
+      } else if (typeof sub.estimatedMinutes === "string") {
+        const coerced = Number(sub.estimatedMinutes);
+        if (Number.isFinite(coerced) && Number.isInteger(coerced)) {
+          sub.estimatedMinutes = normalizeEstimatedMinutes(coerced);
+        }
+      }
       return sub;
     }),
   };
@@ -329,14 +373,28 @@ export class RealAIProvider implements AIProvider {
   // ------------------------------------------------------------
   async decomposeTask(input: DecomposeTaskInput): Promise<DecompositionResult> {
     const content = await this.requestCompletion(buildDecompositionMessages(input));
-    const json = normalizeDecompositionCandidate(parseModelJson(content));
+    const raw = parseModelJson(content);
 
-    // 依赖图的最终裁决仍由服务端 validateDecomposition 执行
-    const parsed = decompositionResultSchema.safeParse(json);
+    // 第一步：宽松 candidate 校验（estimatedMinutes 只要求正整数）
+    const candidate = decompositionCandidateSchema.safeParse(raw);
+    if (!candidate.success) {
+      throw new AIError(
+        "AI_SCHEMA_INVALID",
+        `真实 AI 拆解结果不符合候选结构：${candidate.error.issues
+          .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+          .join("；")}`,
+      );
+    }
+
+    // 第二步：确定性归一化（null 清理 + estimatedMinutes → 15 分钟粒度）
+    const normalized = normalizeDecompositionCandidate(candidate.data);
+
+    // 第三步：正式契约校验（与 Mock 共用同一套 schema，min=15, max=480 强制生效）
+    const parsed = decompositionResultSchema.safeParse(normalized);
     if (!parsed.success) {
       throw new AIError(
         "AI_SCHEMA_INVALID",
-        `真实 AI 拆解结果不符合契约：${parsed.error.issues
+        `真实 AI 拆解结果未通过拆解契约：${parsed.error.issues
           .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
           .join("；")}`,
       );
