@@ -266,14 +266,64 @@ AI 仅提出建议，人工确认后才进入正式数据；`MockAIProvider` 仍
 ## 验证命令
 
 ```bash
-npm run db:verify   # S1 数据层关联验证
+npm run db:verify   # S1 数据层关联验证（隔离临时库，不依赖 dev.db 演示状态）
 npm run s2:verify   # S2 提取链路验证（Mock/契约/确定性/入库与清理）
 npm run s3:verify   # S3 拆解链路验证（契约/DAG/事务写入与回滚/清理）
 npm run s4:verify   # S4 排期验证（构建规则/确定性引擎/约束/确认事务/清理）
 npm run s5:verify   # S5 冲突检测与重排验证（CalendarEvent/检测/受影响集合/预览/确认事务/清理）
 npm run s6:verify   # S6 真实 Provider 验证（配置/请求组装/超时重试/错误码/quote 定位，离线）
 npm run s7:verify   # S7 决策解释时间线验证（聚合/角色映射/old→new/容错/契约/清理，隔离库）
+npm run demo:verify # 演示基线验证（两轮重置结果一致/空状态/结构/不污染，隔离临时库）
 ```
+
+## Demo Reset
+
+一键把本地开发数据库恢复为稳定、可重复的演示初始状态：
+
+```bash
+npm install
+npx prisma migrate deploy
+npm run db:demo
+npm run dev
+```
+
+- `npm run db:demo` 流程：校验 DATABASE_URL → 删除 `prisma/dev.db` → `migrate deploy` → `seed` → demo fixture
+- **只允许重置项目本地 `prisma/dev.db`**；DATABASE_URL 指向其他任何数据库时拒绝执行并报 `DEMO_RESET_UNSAFE_DATABASE`
+- 演示基线：3 门固定课程（高等数学 周一 / 数据结构 周三 / 大学英语 周五）+ 2 个普通任务（图书馆归还资料 / 完成课程阅读）
+- 明确为空：Source / Schedule / CalendarEvent / Conflict / DecisionLog（含 SubTask）——决策历史由现场操作真实产生，不伪造
+- 可重复执行，每次结果一致；不依赖真实 LLM，不调用网络
+
+## Demo Notice
+
+Inbox 页「加载演示通知」按钮使用固定演示文本（[demo-notice.ts](src/lib/fixtures/demo-notice.ts)，Mock 规则可稳定提取 3 项任务），全文如下，也可手动复制粘贴：
+
+```text
+【校学生科技创新协会】关于举办 2026 年校园数字创意挑战赛的通知
+
+各位同学：
+
+为鼓励数字创意实践，校学生科技创新协会定于 2026 年 11 月举办校园数字创意挑战赛，现将有关事项通知如下。
+
+一、参赛对象：全校在读本科生，可个人或组队参赛，每队不超过 3 人。
+二、报名材料提交截止时间为 2026 年 10 月 28 日 18:00，请将报名表发送至赛事公邮。
+三、项目方案（含作品演示视频）提交截止时间为 2026 年 11 月 5 日 12:00，逾期视为放弃参赛资格。
+四、决赛路演答辩定于 2026 年 11 月 15 日 14:00 在创新楼报告厅举行，每队展示 8 分钟。
+五、奖项设置：一等奖 1 名、二等奖 2 名、三等奖 3 名，获奖团队颁发证书与奖金。
+
+请有意参赛的同学合理安排时间，按时提交各项材料。
+
+校学生科技创新协会
+2026 年 10 月 21 日
+```
+
+## Recommended Demo Flow
+
+1. **Inbox**：加载/粘贴演示通知 → AI 提取 → 查看 Evidence（quote 高亮原文）→ 人工确认入库
+2. **Tasks**：对任务执行 AI 拆解 → 查看子任务与依赖 → 「查看决策解释」打开 DecisionDrawer（EXTRACT → DECOMPOSE）
+3. **Schedule**：生成计划 → 查看预览块 rationale → 人工确认写入
+4. **冲突演示**：添加占用计划时段的临时事件 → 红色冲突 → 生成重排预览 → 人工确认（旧 CANCELLED / 新 CONFIRMED）
+5. **DecisionDrawer**：从任务或计划块打开，查看 PLAN / REPLAN 的 RULE_ENGINE 依据与 old → new 对照
+6. **Complete**：逐个子任务标记完成 → 父任务自动完成 → 未来计划自动取消，时间线出现 HUMAN 阶段
 
 ## AIProvider 架构
 
